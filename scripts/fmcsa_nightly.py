@@ -20,7 +20,7 @@ Optional environment variables:
   SOCRATA_APP_TOKEN  free token from data.transportation.gov; avoids throttling on big pulls
 Your FMCSA QCMobile webKey is NOT needed for bulk data. Keep it for live single-carrier lookups on a server.
 """
-import argparse, csv, gzip, io, json, os, sys, time, datetime as dt
+import argparse, csv, gzip, io, json, os, re, sys, time, datetime as dt
 import requests
 
 BASE = "https://data.transportation.gov"
@@ -147,16 +147,20 @@ def load_insurance(ds):
         or next((c for c in have if "dot" in c), None)
     canc = next((c for c in ("cancl_effective_date", "cancel_effective_date", "cancellation_date") if c in have), None) \
         or next((c for c in have if ("cancl" in c or "cancel" in c) and "date" in c), None)
-    if not dot or not canc:
-        print("WARNING: could not find the DOT or cancel-date column; insurance NOT joined.", file=sys.stderr)
+    dock = next((c for c in have if "docket" in c), None)
+    if not canc or not (dot or dock):
+        print("WARNING: could not find a DOT/docket column and a cancel-date column; insurance NOT joined.", file=sys.stderr)
         return {}
     sample = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
     print("Insurance sample rows:", json.dumps(sample)[:900])
-    print(f"Using DOT column '{dot}' and cancel date column '{canc}'")
+    print(f"Using DOT column '{dot}', docket column '{dock}', cancel date column '{canc}'")
     today, out, seen, parsed = dt.date.today(), {}, 0, 0
-    for r in pull(ds, select=f"{dot},{canc}"):
+    for r in pull(ds, select=",".join(dict.fromkeys(x for x in (dot, dock, canc) if x))):
         seen += 1
-        d = str(r.get(dot, "")).strip().lstrip("0")
+        d = str(r.get(dot, "")).strip().lstrip("0") if dot else ""
+        if not d and dock:
+            dd = re.sub(r"\D", "", str(r.get(dock, ""))).lstrip("0")
+            d = "mc" + dd if dd else ""
         if not d:
             continue
         o = out.setdefault(d, {"insurance_status": "Active", "cancel_effective_date": ""})
@@ -209,7 +213,8 @@ def run(a):
         for r in rows:
             g = cache.get(r.get("_k", "")) or ["", ""]
             r["LATITUDE"], r["LONGITUDE"] = g
-            r.update(li.get(r["DOT_NUMBER"].lstrip("0"), {}))
+            mc = re.sub(r"\D", "", r.get("DOCKET1", "")).lstrip("0")
+            r.update(li.get(r["DOT_NUMBER"].lstrip("0")) or (li.get("mc" + mc) if mc else None) or {})
         act = [r for r in rows if r.get("STATUS_CODE", "A") == "A"]
         oth = [r for r in rows if r.get("STATUS_CODE", "A") != "A"]
         for name, part in ((st, act), (st + "-other", oth)):
