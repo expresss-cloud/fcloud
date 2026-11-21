@@ -6,7 +6,7 @@ What it does, each run:
   1. Pulls the FMCSA Company Census File (data.transportation.gov, dataset az4n-8mr2) one state at a time.
   2. Optionally joins authority / insurance status from a Licensing & Insurance dataset (--li ...).
   3. Geocodes new or changed addresses with the free US Census batch geocoder (results are cached).
-  4. Writes data/<ST>.csv.gz (one gzip file per state) and data/index.json, replacing files atomically.
+  4. Writes data/<ST>.csv.gz (active carriers) and data/<ST>-other.csv.gz (inactive/other) and data/index.json, replacing files atomically.
 The CSVs use the column names the Carrier Map already imports (LATITUDE / LONGITUDE included).
 
 Pending insurance cancellation comes from FMCSA's ActPendInsur dataset (cancel effective date).
@@ -35,7 +35,8 @@ ALIASES = {
     "PHY_STREET": ["phy_street", "phy_street1"], "PHY_CITY": ["phy_city"], "PHY_STATE": ["phy_state"],
     "PHY_ZIP": ["phy_zip"], "TELEPHONE": ["telephone", "phone"], "EMAIL_ADDRESS": ["email_address"],
     "STATUS_CODE": ["status_code"], "NBR_POWER_UNIT": ["nbr_power_unit", "power_units"],
-    "DRIVER_TOTAL": ["driver_total", "total_drivers"], "HM_FLAG": ["hm_flag"],
+    "DRIVER_TOTAL": ["driver_total", "total_drivers"], "HM_FLAG": ["hm_flag", "hm_ind"], "DOCKET1": ["docket1"], "CLASSDEF": ["classdef"],
+    "OFFICER1": ["company_officer_1"], "OFFICER2": ["company_officer_2"],
     "CARRIER_OPERATION": ["carrier_operation"], "MCS150_DATE": ["mcs150_date"],
 }
 
@@ -139,26 +140,35 @@ def parse_date(s):
 
 
 def load_insurance(ds):
-    """Pending cancellation = an insurance policy with a cancel-effective date today or later."""
+    """Pending cancellation = a policy whose cancel-effective date is today or later."""
     have = fields(ds)
-    dot = next((f for f in have if "dot" in f), None)
-    canc = next((f for f in have if ("cancl" in f or "cancel" in f) and "date" in f), None)
+    print(f"Insurance dataset {ds} columns: {', '.join(have)}")
+    dot = next((c for c in ("dot_number", "usdot_number", "usdot", "dot", "dot_no") if c in have), None) \
+        or next((c for c in have if "dot" in c), None)
+    canc = next((c for c in ("cancl_effective_date", "cancel_effective_date", "cancellation_date") if c in have), None) \
+        or next((c for c in have if ("cancl" in c or "cancel" in c) and "date" in c), None)
     if not dot or not canc:
-        print(f"WARNING: could not find DOT / cancel-date columns in {ds}. Columns: {', '.join(have)}", file=sys.stderr)
+        print("WARNING: could not find the DOT or cancel-date column; insurance NOT joined.", file=sys.stderr)
         return {}
-    print(f"Insurance dataset {ds}: DOT column '{dot}', cancel date column '{canc}'")
-    today, out = dt.date.today(), {}
+    sample = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
+    print("Insurance sample rows:", json.dumps(sample)[:900])
+    print(f"Using DOT column '{dot}' and cancel date column '{canc}'")
+    today, out, seen, parsed = dt.date.today(), {}, 0, 0
     for r in pull(ds, select=f"{dot},{canc}"):
-        d = str(r.get(dot, "")).lstrip("0")
+        seen += 1
+        d = str(r.get(dot, "")).strip().lstrip("0")
         if not d:
             continue
         o = out.setdefault(d, {"insurance_status": "Active", "cancel_effective_date": ""})
         c = parse_date(r.get(canc))
-        if c and c >= today:
+        if c:
+            parsed += 1
+        if c and today <= c < dt.date(2100, 1, 1):
             o["insurance_status"] = "Pending cancellation"
             if not o["cancel_effective_date"] or c.isoformat() < o["cancel_effective_date"]:
                 o["cancel_effective_date"] = c.isoformat()
-    print(f"Insurance records: {len(out)}; pending cancellation: {sum(v['insurance_status'] != 'Active' for v in out.values())}")
+    pend = sum(v["insurance_status"] != "Active" for v in out.values())
+    print(f"Insurance rows read: {seen}; with a cancel date: {parsed}; carriers: {len(out)}; pending cancellation: {pend}")
     return out
 
 
@@ -196,18 +206,26 @@ def run(a):
             json.dump(cache, open(cpath, "w"))
         extra = sorted({k for v in li.values() for k in v})
         cols = [k for k in ALIASES if m[k]] + ["LATITUDE", "LONGITUDE"] + extra
-        tmp = os.path.join(a.out, st + ".csv.gz.tmp")
-        with gzip.open(tmp, "wt", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
-            w.writeheader()
-            for r in rows:
-                g = cache.get(r.get("_k", "")) or ["", ""]
-                r["LATITUDE"], r["LONGITUDE"] = g
-                r.update(li.get(r["DOT_NUMBER"].lstrip("0"), {}))
-                w.writerow(r)
-        os.replace(tmp, os.path.join(a.out, st + ".csv.gz"))
+        for r in rows:
+            g = cache.get(r.get("_k", "")) or ["", ""]
+            r["LATITUDE"], r["LONGITUDE"] = g
+            r.update(li.get(r["DOT_NUMBER"].lstrip("0"), {}))
+        act = [r for r in rows if r.get("STATUS_CODE", "A") == "A"]
+        oth = [r for r in rows if r.get("STATUS_CODE", "A") != "A"]
+        for name, part in ((st, act), (st + "-other", oth)):
+            path = os.path.join(a.out, name + ".csv.gz")
+            if not part:
+                if os.path.exists(path):
+                    os.remove(path)
+                continue
+            tmp = path + ".tmp"
+            with gzip.open(tmp, "wt", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(part)
+            os.replace(tmp, path)
         summary[st] = len(rows)
-        print(f"{st}: wrote {len(rows)} carriers")
+        print(f"{st}: wrote {len(act)} active + {len(oth)} other carriers")
     idx = os.path.join(a.out, "index.json")
     old = json.load(open(idx)).get("states", {}) if os.path.exists(idx) else {}
     old.update(summary)
