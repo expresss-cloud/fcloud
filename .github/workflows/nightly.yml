@@ -1,0 +1,26 @@
+name: Nightly FMCSA data
+on:
+  schedule:
+    - cron: "15 8 * * *"   # 08:15 UTC daily (3:15 am US Eastern)
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install requests
+      - uses: actions/cache@v4
+        with:
+          path: geocache.json
+          key: geocache-${{ github.run_id }}
+          restore-keys: geocache-
+      - run: python scripts/fmcsa_nightly.py run --out data
+        env:
+          SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+      - run: npx --yes netlify-cli deploy --prod --dir=. --no-build
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
