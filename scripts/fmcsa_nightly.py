@@ -139,31 +139,43 @@ def parse_date(s):
     return None
 
 
-def load_insurance(ds):
-    """Pending cancellation = a policy whose cancel-effective date is today or later."""
+DETAIL_RE = re.compile(r"insur|polic|effective|posted|limit|max|underl|company|form|type", re.I)
+DIAG = {}
+MATCH = [0]
+
+
+def _load_ins(ds):
     have = fields(ds)
-    print(f"Insurance dataset {ds} columns: {', '.join(have)}")
+    d = {"dataset": ds, "columns": have}
     dot = next((c for c in ("dot_number", "usdot_number", "usdot", "dot", "dot_no") if c in have), None) \
         or next((c for c in have if "dot" in c), None)
+    dock = next((c for c in have if "docket" in c), None)
     canc = next((c for c in ("cancl_effective_date", "cancel_effective_date", "cancellation_date") if c in have), None) \
         or next((c for c in have if ("cancl" in c or "cancel" in c) and "date" in c), None)
-    dock = next((c for c in have if "docket" in c), None)
+    detail = [c for c in have if c not in (dot, dock, canc) and DETAIL_RE.search(c)][:8]
+    d.update(dot=dot, docket=dock, cancel=canc, detail=detail)
+    print(f"Insurance dataset {ds}: columns {', '.join(have)}")
     if not canc or not (dot or dock):
-        print("WARNING: could not find a DOT/docket column and a cancel-date column; insurance NOT joined.", file=sys.stderr)
-        return {}
-    sample = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
-    print("Insurance sample rows:", json.dumps(sample)[:900])
-    print(f"Using DOT column '{dot}', docket column '{dock}', cancel date column '{canc}'")
+        d["error"] = "could not find a DOT/docket column and a cancel-date column"
+        print("WARNING:", d["error"], file=sys.stderr)
+        return {}, d
+    d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
+    print("Insurance sample rows:", json.dumps(d["sample"])[:900])
     today, out, seen, parsed = dt.date.today(), {}, 0, 0
-    for r in pull(ds, select=",".join(dict.fromkeys(x for x in (dot, dock, canc) if x))):
+    sel = ",".join(dict.fromkeys(x for x in [dot, dock, canc] + detail if x))
+    for r in pull(ds, select=sel):
         seen += 1
-        d = str(r.get(dot, "")).strip().lstrip("0") if dot else ""
-        if not d and dock:
+        k = str(r.get(dot, "")).strip().lstrip("0") if dot else ""
+        if not k and dock:
             dd = re.sub(r"\D", "", str(r.get(dock, ""))).lstrip("0")
-            d = "mc" + dd if dd else ""
-        if not d:
+            k = "mc" + dd if dd else ""
+        if not k:
             continue
-        o = out.setdefault(d, {"insurance_status": "Active", "cancel_effective_date": ""})
+        o = out.setdefault(k, {"insurance_status": "Active", "cancel_effective_date": ""})
+        for c in detail:
+            v = str(r.get(c, "") or "").strip()
+            if v:
+                o["ins_" + c] = v
         c = parse_date(r.get(canc))
         if c:
             parsed += 1
@@ -171,9 +183,27 @@ def load_insurance(ds):
             o["insurance_status"] = "Pending cancellation"
             if not o["cancel_effective_date"] or c.isoformat() < o["cancel_effective_date"]:
                 o["cancel_effective_date"] = c.isoformat()
-    pend = sum(v["insurance_status"] != "Active" for v in out.values())
-    print(f"Insurance rows read: {seen}; with a cancel date: {parsed}; carriers: {len(out)}; pending cancellation: {pend}")
-    return out
+    d.update(rows=seen, with_cancel_date=parsed, carriers=len(out),
+             pending=sum(v["insurance_status"] != "Active" for v in out.values()))
+    print(f"Insurance rows read: {seen}; with a cancel date: {parsed}; carriers: {len(out)}; pending cancellation: {d['pending']}")
+    return out, d
+
+
+def load_insurance(candidates):
+    diag = {"tried": []}
+    for ds in candidates:
+        try:
+            out, d = _load_ins(ds.strip())
+        except (Exception, SystemExit) as e:
+            diag["tried"].append({"dataset": ds, "error": str(e)[:300] or repr(e)[:300]})
+            print("Insurance dataset", ds, "failed:", e, file=sys.stderr)
+            continue
+        diag["tried"].append({k: v for k, v in d.items() if k != "sample"})
+        diag.setdefault("details", {})[ds] = d
+        if out:
+            diag["used"] = ds
+            return out, diag
+    return {}, diag
 
 
 def run(a):
@@ -186,7 +216,9 @@ def run(a):
     print("Census columns used:", {k: v for k, v in m.items() if v})
     li = load_li(a)
     if not a.no_insurance:
-        for d, v in load_insurance(a.ins_dataset).items():
+        ins, dg = load_insurance(a.ins_dataset.split(","))
+        DIAG.update(dg)
+        for d, v in ins.items():
             li.setdefault(d, {}).update(v)
     cpath = a.cache
     cache = json.load(open(cpath)) if os.path.exists(cpath) else {}
@@ -215,6 +247,7 @@ def run(a):
             r["LATITUDE"], r["LONGITUDE"] = g
             mc = re.sub(r"\D", "", r.get("DOCKET1", "")).lstrip("0")
             r.update(li.get(r["DOT_NUMBER"].lstrip("0")) or (li.get("mc" + mc) if mc else None) or {})
+            MATCH[0] += 1 if "insurance_status" in r else 0
         act = [r for r in rows if r.get("STATUS_CODE", "A") == "A"]
         oth = [r for r in rows if r.get("STATUS_CODE", "A") != "A"]
         for name, part in ((st, act), (st + "-other", oth)):
@@ -234,7 +267,12 @@ def run(a):
     idx = os.path.join(a.out, "index.json")
     old = json.load(open(idx)).get("states", {}) if os.path.exists(idx) else {}
     old.update(summary)
-    json.dump({"updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "states": old}, open(idx, "w"))
+    used = DIAG.get("used")
+    d = DIAG.get("details", {}).get(used, {}) if used else {}
+    summ = {"used": used, "carriers": d.get("carriers"), "pending": d.get("pending"), "matched": MATCH[0],
+            "error": None if used else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("tried", []))}
+    json.dump({"updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "states": old, "insurance": summ}, open(idx, "w"))
+    json.dump(DIAG, open(os.path.join(a.out, "diagnostics.json"), "w"), indent=1)
 
 
 def main():
@@ -249,7 +287,7 @@ def main():
     r.add_argument("--geocode-status", default="A", help="comma list of status codes to geocode (default A = active; '' = all)")
     r.add_argument("--max-geocode", type=int, default=150000, help="max new addresses to geocode per run")
     r.add_argument("--cache", default="geocache.json")
-    r.add_argument("--ins-dataset", default="qh9u-swkp", help="ActPendInsur - All With History")
+    r.add_argument("--ins-dataset", default="qh9u-swkp,chgs-tx6x,y77m-3nfx", help="comma list of insurance dataset ids; first one that works is used")
     r.add_argument("--no-insurance", action="store_true")
     r.add_argument("--no-geocode", action="store_true")
     r.add_argument("--retry-misses", action="store_true", help="retry addresses the geocoder could not match")
