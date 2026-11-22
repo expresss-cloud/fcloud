@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Carrier Map – FMCSA carrier locator</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.17/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/1.6.9/topojson.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/datamaps/0.5.9/datamaps.usa.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#e8ecef;--panel:#fff;--ink:#14202b;--mute:#5d6b78;--line:#cfd7de;--sign:#0b6e4f;--amber:#f2a900;--t0:#dfe5ea;--t1:#b7d8cb;--t2:#7fbba3;--t3:#3f937a;--t4:#0b6e4f;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1820;--panel:#17232d;--ink:#e6edf2;--mute:#93a2af;--line:#2a3a47;--sign:#3fbf94;--t0:#22313c;--t1:#24493f;--t2:#2a6b59;--t3:#2f8f74;--t4:#3fbf94}}
+:root[data-theme="dark"]{--bg:#0f1820;--panel:#17232d;--ink:#e6edf2;--mute:#93a2af;--line:#2a3a47;--sign:#3fbf94;--t0:#22313c;--t1:#24493f;--t2:#2a6b59;--t3:#2f8f74;--t4:#3fbf94}
+html{color-scheme:light dark}*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 Barlow,system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 20px;background:var(--sign);color:#fff}
+header h1{font:700 28px/1 "Barlow Condensed",sans-serif;margin:0}header p{margin:2px 0 0;font-size:13px;opacity:.9}
+.tools{display:flex;gap:8px;flex-wrap:wrap}button,select,input{font:inherit;color:inherit}
+.btn{background:rgba(255,255,255,.16);color:#fff;border:1px solid rgba(255,255,255,.55);border-radius:6px;padding:7px 12px;cursor:pointer;font-weight:600}.btn:hover{background:rgba(255,255,255,.3)}
+main{display:grid;gap:16px;padding:16px 20px;max-width:1500px;margin:auto}@media(max-width:700px){main{padding:12px}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;min-width:0}
+.card h2{font:700 24px/1.1 "Barlow Condensed",sans-serif;margin:0}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.back{background:var(--sign);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer;font-weight:600}.back[hidden]{display:none}
+#mapbox{width:100%;max-width:1000px;margin:auto;aspect-ratio:1.6;position:relative}
+#mapbox svg{display:block;width:100%;height:auto}
+.dot{cursor:pointer}.legend{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:var(--mute);justify-content:center}.legend span{width:26px;height:10px;border-radius:2px}
+#tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);padding:4px 8px;border-radius:4px;font-size:13px;display:none;z-index:9;max-width:240px}
+.filters label:has(#imin),.filters label:has(#imax){display:none}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin:10px 0}
+.stat{border-left:4px solid var(--sign);padding:2px 10px}.stat b{display:block;font:700 26px/1 "Barlow Condensed",sans-serif}.stat small{color:var(--mute)}
+.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:12px}
+.filters label{font-size:12px;color:var(--mute);display:flex;flex-direction:column;gap:3px}
+.ms{position:relative}.msb{width:100%;text-align:left;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 24px 6px 8px;cursor:pointer;position:relative;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.msb::after{content:"▾";position:absolute;right:8px;color:var(--mute)}.msp{position:absolute;z-index:30;left:0;top:calc(100% + 2px);min-width:100%;max-height:280px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.25);padding:4px}.mso{display:flex;gap:6px;align-items:center;padding:6px 8px;border-radius:5px;cursor:pointer;color:var(--ink);font-size:13px;white-space:nowrap}.mso:hover{background:var(--t0)}.mso input{width:auto!important;margin:0}.filters input,.filters select,.cf{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+.wide{grid-column:1/-1}
+.scroll{overflow:auto;border:1px solid var(--line);border-radius:6px;max-height:640px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:6px 10px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line)}
+thead tr:first-child th{position:sticky;top:0;background:var(--panel);cursor:pointer;user-select:none;font-weight:600;z-index:2}
+thead tr:nth-child(2) th{position:sticky;top:34px;background:var(--panel);padding:4px 6px;z-index:2;cursor:default}
+th[aria-sort=ascending]::after{content:" ▲ A–Z";font-size:10px}th[aria-sort=descending]::after{content:" ▼ Z–A";font-size:10px}
+.cf{min-width:70px;padding:3px 6px;font-size:12px}
+tbody tr{cursor:pointer}tbody tr:hover{background:var(--bg)}tr.on{background:var(--t1)}
+.det td{white-space:normal;background:var(--bg);cursor:default}
+.kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px 16px}.kv small{color:var(--mute);display:block}
+.pill{padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;background:var(--t1);color:#0a3d2c}.pill.bad{background:#f3c9c4;color:#6b1a10}.pill.none{background:var(--line);color:var(--mute)}.pill.warn{background:#fde3a1;color:#5c4100}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:10px;color:var(--mute);font-size:13px;flex-wrap:wrap;gap:8px}
+.foot button,.pri{background:var(--sign);color:#fff;border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-weight:600}
+.ghost{background:transparent!important;color:var(--sign)!important;border:1px solid var(--sign)!important}
+.note{font-size:12.5px;color:var(--mute);margin:8px 0 0}
+button:focus-visible,input:focus-visible,select:focus-visible,th:focus-visible{outline:3px solid var(--amber)}
+
+.sms-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
+.sms-bg.on{display:flex}
+.sms{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,100%);max-height:92vh;overflow:auto;padding:18px}
+.sms h3{margin:0 0 10px}.sms label{display:block;font-size:13px;color:var(--mute);margin:10px 0 4px}
+.sms input[type=password],.sms textarea,.sms select{width:100%;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px}
+.sms textarea{min-height:90px;resize:vertical}.sms .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.sms .msg{font-size:13px;margin-top:8px;min-height:18px}.sms .err{color:#c0392b}.sms progress{width:100%}
+</style></head><body>
+<header>
+<div><h1>Carrier Map</h1><p id="src"></p></div>
+<div class="tools"><button class="btn" id="imp">Import CSV / Excel</button><button class="btn" id="smp">Reset to sample</button><input type="file" id="file" accept=".csv,.txt,.xlsx,.xls" hidden></div>
+</header>
+<main>
+<section class="card">
+<div class="bar"><h2 id="mt">United States</h2><button class="back" id="back" hidden>← All states</button></div>
+<div id="mapbox"></div><div id="tip"></div>
+<div class="legend">Fewer<span style="background:var(--t0)"></span><span style="background:var(--t1)"></span><span style="background:var(--t2)"></span><span style="background:var(--t3)"></span><span style="background:var(--t4)"></span>More carriers</div>
+<p class="note" id="mn" style="text-align:center">Click a state to zoom in and see every carrier as a dot at its address.</p>
+</section>
+<section class="card"><h2 id="ttl">All states</h2>
+
+<div class="filters">
+<label class="wide">Search name, DOT, MC, city or ZIP<input id="q" type="search" placeholder="e.g. Safeline, 1234567, Miami"></label>
+<label>Status<select id="fs"><option value="">Any</option><option>Active</option><option>Inactive</option><option>Out of service</option></select></label>
+<label>Entity type<select id="ft"><option value="">Any</option><option>Carrier</option><option>Broker</option><option>Carrier + Broker</option></select></label>
+<label style="flex-direction:row;align-items:center;gap:6px;align-self:end;padding-bottom:6px"><input type="checkbox" id="fx" style="width:auto"> Include inactive &amp; other</label><label>For hire / private<select id="fc"><option value="">Any</option><option>For hire</option><option>Private</option><option>For hire + Private</option><option>Other</option></select></label><label>Operation<select id="fo"><option value="">Any</option><option>Interstate</option><option>Intrastate</option></select></label>
+<label>Hazmat<select id="fh"><option value="">Any</option><option value="Y">Yes</option><option value="N">No</option></select></label><label>Authority<select id="fa"><option value="">Any</option><option>Active</option><option>Pending cancellation</option><option>Application pending</option><option>Inactive</option><option>None</option></select></label><label>Authority notice posted<select id="fn"><option value="">Any time</option><option value="0">Today</option><option value="1">Last 2 days</option><option value="6">Last 7 days</option><option value="29">Last 30 days</option><option value="old">Older than 30 days</option></select></label><label>Insurance<select id="fi"><option value="">Any</option><option>Pending or cancelled</option><option>Active</option><option>Pending cancellation</option><option>Cancelled</option><option>None</option></select></label><label style="flex-direction:row;align-items:center;gap:6px;align-self:end;padding-bottom:6px"><input type="checkbox" id="fp" style="width:auto"> Pending cancellation only</label>
+<label>Min. trucks<input id="tmin" type="number" min="0"></label><label>Max. trucks<input id="tmax" type="number" min="0"></label>
+<label>Min. drivers<input id="dmin" type="number" min="0"></label><label>Max. drivers<input id="dmax" type="number" min="0"></label>
+<label>Min. inspections<input id="imin" type="number" min="0"></label><label>Max. inspections<input id="imax" type="number" min="0"></label>
+</div>
+<div class="bar"><span class="note" style="margin:0">Click a header to sort A–Z or Z–A, Shift-click to add a second sort. Use the boxes under each header to filter that column (numbers accept &gt;50, &lt;=10 or 5-20).</span>
+<span><button class="pri" id="sm">Send text</button> <button class="pri ghost" id="pf">Sort pending first</button> <button class="pri" id="xl">Export Excel</button> <button class="pri ghost" id="cv">Export CSV</button></span></div>
+<div class="scroll"><table><thead><tr id="hd"></tr><tr id="hf"></tr></thead><tbody id="tb"></tbody></table></div>
+<div class="foot"><span id="cnt"></span><span><button id="more" hidden>Show 100 more</button> <button id="clr" class="ghost">Clear all filters</button></span></div>
+<p class="note">Real data: export the FMCSA Company Census File (data.transportation.gov) for one or a few states as CSV or Excel and import it. Recognized columns include DOT_NUMBER, LEGAL_NAME, PHY_STATE, PHY_CITY, PHY_ZIP, NBR_POWER_UNIT, DRIVER_TOTAL, HM_FLAG and an inspections column (insp_total). Add LATITUDE and LONGITUDE columns for exact dots; without them dots are placed approximately inside the state by ZIP. Files stay in your browser.</p>
+</section></main>
+<div class="sms-bg" id="smsbg"><div class="sms" role="dialog" aria-label="Send text message">
+<h3>Send text message</h3>
+<div id="smsar" hidden><label for="smsa">Send as (RingCentral user)</label><select id="smsa"></select></div>
+<label for="smsc" id="smscl">Access code</label><input id="smsc" type="password" autocomplete="off" placeholder="Access code set in Netlify">
+<label>Send to</label><select id="smsw"></select>
+<label for="smsf">From number (RingCentral numbers that can send texts)</label><select id="smsf" size="5" aria-label="From number"></select>
+<div class="row" style="margin-top:6px"><button class="pri ghost" id="smsl" type="button">Reload numbers</button><span class="note" id="smsn" style="margin:0"></span></div>
+<label for="smst">Message</label><textarea id="smst" maxlength="900" placeholder="Type your message"></textarea>
+<label for="smsy">Pause between texts (a little random variation is added)</label><select id="smsy"><option value="5">About 5 seconds</option><option value="10">About 10 seconds</option><option value="15" selected>About 15 seconds</option><option value="30">About 30 seconds</option><option value="60">About 1 minute</option></select>
+<div class="note" id="smsk" style="margin:4px 0 0"></div>
+<progress id="smsp" value="0" max="1" hidden></progress>
+<div class="msg" id="smsm" role="status"></div>
+<div class="row"><button class="pri" id="smsg" type="button">Send</button><button class="pri ghost" id="smsx" type="button">Close</button><button class="pri ghost" id="smsd" type="button" hidden>Download log (CSV)</button></div>
+</div></div>
+<script>
+const NAMES={AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",DC:"District of Columbia",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",WI:"Wisconsin",WY:"Wyoming"};
+const COLS=[["name","Legal name"],["owner","Owner"],["dot","DOT #"],["mc","MC #"],["city","City"],["state","State"],["zip","ZIP"],["status","Status"],["type","Type"],["trucks","Trucks"],["drivers","Drivers"],["auth","Authority"],["apend","Auth pending date"],["acancel","Auth cancels on"],["ins","Insurance"],["cdate","Cancel date"],["reinst","Reinstated"],["hazmat","Hazmat"],["op","Operation"],["hire","For hire / private"],["phone","Phone"],["email","Email"]];
+const $=id=>document.getElementById(id),esc=s=>String(s).replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
+let LIVE=false,IDX={},LOADED={},ROADS,DATA=[],sel="",sorts=[["name",1]],shown=100,open=null,CF={},map,svgEl,W=1,H=1,vb=[0,0,1,1],SUB={},dotsG,labG,cG,CTY={};
+const hh=s=>{let x=2166136261;for(let i=0;i<s.length;i++){x^=s.charCodeAt(i);x=Math.imul(x,16777619)}return(x>>>0)/4294967296};
+function sample(){let s=7;const r=()=>(s=(s*16807)%2147483647)/2147483647;
+const A=["Safe","Blue Ridge","Iron","Eagle","Prairie","Summit","Liberty","Cardinal","Delta","Lone Star","Great Lakes","Pioneer","Harbor","Redline","Keystone","Rapid","Atlas","Northstar"],B=["Transport","Freight","Logistics","Trucking","Carriers","Hauling","Express","Lines"],big=["TX","CA","FL","IL","GA","OH","PA","NY"],o=[];let n=1000000;
+for(const st in NAMES){const k=Math.floor(4+r()*14+(big.includes(st)?25:0));for(let i=0;i<k;i++){const t=r(),tr=Math.max(1,Math.floor(Math.pow(r(),3)*400)),b=r()<.12;n+=Math.floor(1+r()*9000);
+o.push({name:A[Math.floor(r()*A.length)]+"line "+B[Math.floor(r()*B.length)]+" LLC",dba:"",dot:String(n),mc:String(Math.floor(100000+r()*900000)),city:NAMES[st].split(" ")[0]+" "+["City","Falls","Heights","Junction"][Math.floor(r()*4)],state:st,zip:String(10000+Math.floor(r()*89999)),phone:"("+(200+Math.floor(r()*700))+") 555-"+String(1000+Math.floor(r()*8999)),email:"",status:t<.8?"Active":t<.92?"Inactive":"Out of service",type:b?"Carrier + Broker":t>.97?"Broker":"Carrier",trucks:tr,drivers:Math.max(1,Math.round(tr*(.8+r()*.6))),insp:Math.round(tr*r()*5),hazmat:r()<.1?"Y":"N",op:r()<.7?"Interstate":"Intrastate",hire:["For hire","For hire","Private","For hire + Private"][Math.floor(r()*4)],mcs:"2025-0"+(1+Math.floor(r()*9))+"-1"+Math.floor(r()*9),lat:0,lng:0})}}return o.map((c,i)=>{c._i=i;const x=hh(c.dot),y=hh(c.dot+"i");c.auth=x<.06?"Pending cancellation":x<.1?"Revoked":x<.12?"None":"Active";c.ins=y<.09?"Pending cancellation":y<.13?"Cancelled":y<.15?"None":"Active";c.pend=(c.auth.startsWith("Pend")||c.ins.startsWith("Pend"))?1:0;c.cdate=c.pend?"2026-12-"+String(1+Math.floor(hh(c.dot+"d")*28)).padStart(2,"0"):"";return c})}
+const AL={name:["legal_name","legalname","name"],dba:["dba_name","dba"],dot:["dot_number","usdot","dot","usdot_number"],mc:["docket1","mc_number","mc","docket_number"],city:["phy_city","city"],state:["phy_state","state"],zip:["phy_zip","zip"],phone:["telephone","phone"],email:["email_address","email"],status:["status_code","status","operating_status"],trucks:["nbr_power_unit","power_units","trucks"],drivers:["driver_total","drivers"],insp:["insp_total","inspections","nbr_inspections","inspection_total","total_inspections"],hazmat:["hm_flag","hazmat"],op:["carrier_operation","operation"],mcs:["mcs150_date"],type:["entity_type","type"],lat:["latitude","lat","phy_lat"],lng:["longitude","lng","lon","phy_lon"],auth:["authority_status","auth_status","common_stat","authority"],ins:["insurance_status","ins_status","insurance"],reinst:["reinstated_date"],apend:["authority_pending_date"],acancel:["authority_cancel_date","ins_authority_pending_date"],atype:["authority_pending_type","ins_authority_pending_type"],owner:["company_officer_1","officer_1","officer1"],owner2:["company_officer_2","officer_2","officer2"],cls:["classdef","operation_classification"],cdate:["cancel_effective_date","cancellation_date","ins_cancel_date","cancel_date"]};
+function csv(t){const rows=[];let r=[],f="",q=false;for(let i=0;i<t.length;i++){const c=t[i];if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}else if(c=='"')q=true;else if(c==","){r.push(f);f=""}else if(c=="\n"||c=="\r"){if(c=="\r"&&t[i+1]=="\n")i++;r.push(f);f="";if(r.length>1||r[0])rows.push(r);r=[]}else f+=c}if(f||r.length){r.push(f);rows.push(r)}return rows}
+const hireOf=t=>{t=String(t||"").toUpperCase();const h=/FOR HIRE/.test(t),p=/PRIVATE/.test(t);return h&&p?"For hire + Private":h?"For hire":p?"Private":t?"Other":""};
+function imp(rows,name,append){const base=append?DATA.length:0;if(rows.length<2)return alert("No rows found in that file.");const h=rows[0].map(x=>String(x).trim().toLowerCase().replace(/[^a-z0-9]+/g,"_")),ix={},xi=h.map((x,i)=>x.startsWith("ins_")&&x!="ins_status"&&!/^ins_authority_pending/.test(x)?i:-1).filter(i=>i>=0);
+for(const k in AL){const i=AL[k].map(a=>h.indexOf(a)).find(i=>i>=0);if(i!==undefined)ix[k]=i}
+if(ix.state===undefined)return alert("Could not find a state column (for example PHY_STATE).");
+const g=(r,k)=>ix[k]===undefined?"":String(r[ix[k]]==null?"":r[ix[k]]).trim(),out=[];
+for(const r of rows.slice(1)){const st=g(r,"state").toUpperCase();if(!NAMES[st])continue;let s=g(r,"status").toUpperCase();s=s=="A"||s=="ACTIVE"?"Active":s=="I"||s=="INACTIVE"?"Inactive":s.startsWith("OUT")||s=="OOS"?"Out of service":g(r,"status")||"Active";
+let op=g(r,"op");op=/^a$/i.test(op)||/^inter/i.test(op)?"Interstate":/^[bc]$/i.test(op)||/^intra/i.test(op)?"Intrastate":op;
+out.push({_i:base+out.length,name:g(r,"name"),dba:g(r,"dba"),dot:g(r,"dot"),mc:g(r,"mc").replace(/\D/g,""),city:g(r,"city"),state:st,zip:g(r,"zip"),phone:g(r,"phone"),email:g(r,"email"),status:s,type:g(r,"type")||"Carrier",trucks:+g(r,"trucks")||0,drivers:+g(r,"drivers")||0,insp:+g(r,"insp")||0,hazmat:/^(y|yes|true|1)$/i.test(g(r,"hazmat"))?"Y":"N",op:op,mcs:g(r,"mcs"),lat:+g(r,"lat")||0,lng:+g(r,"lng")||0,auth:(ix.auth===undefined?"":(g(r,"auth")||"None")),ins:(ix.ins===undefined?"":ns(g(r,"ins"),"Cancelled")||"None"),cdate:g(r,"cdate"),hire:hireOf(g(r,"cls")),reinst:g(r,"reinst"),apend:g(r,"apend"),acancel:g(r,"acancel"),atype:g(r,"atype"),owner:g(r,"owner"),owner2:g(r,"owner2"),x:xi.map(i=>[h[i].slice(4).replace(/_/g," "),String(r[i]==null?"":r[i]).trim()]).filter(y=>y[1])});const L=out[out.length-1];L.pend=(L.auth.startsWith("Pend")||L.ins.startsWith("Pend"))?1:0}
+if(!out.length)return alert("No usable rows. Check that the state column holds two-letter codes.");if(append){DATA=DATA.concat(out);return out.length}DATA=out;LIVE=false;go("");$("src").textContent="Imported "+out.length.toLocaleString()+" carriers from "+name}
+const ns=(v,bad)=>!v?"":/pend/i.test(v)?"Pending cancellation":/^(a|active)$/i.test(v)?"Active":/^(n|none)$/i.test(v)?"None":bad;const num=(id,v,lo)=>{const x=$(id).value;return x===""||(lo?v>=+x:v<=+x)};
+function match(c){const q=$("q").value.trim().toLowerCase(),f=(id,k)=>{const v=vals(id);return !v.length||v.includes(c[k])};
+return(!q||(c.name+" "+c.owner+" "+c.dba+" "+c.dot+" "+c.mc+" "+c.city+" "+c.zip).toLowerCase().includes(q))&&f("fs","status")&&f("ft","type")&&f("fh","hazmat")&&f("fo","op")&&f("fc","hire")&&(!LIVE||$("fx").checked||c.status=="Active")&&f("fa","auth")&&(!vals("fi").length||vals("fi").some(v=>v=="Pending or cancelled"?(c.ins=="Pending cancellation"||c.ins=="Cancelled"):c.ins===v))&&(!$("fp").checked||c.pend)&&postedOk(c)&&num("tmin",c.trucks,1)&&num("tmax",c.trucks)&&num("dmin",c.drivers,1)&&num("dmax",c.drivers)&&num("imin",c.insp,1)&&num("imax",c.insp)}
+const postedOk=c=>{const v=$("fn").value;if(!v)return true;if(!c.apend)return false;const d=Math.floor((Date.now()-new Date(c.apend+"T00:00:00").getTime())/864e5);return v=="old"?d>=30:d<=+v};
+function cmp(v,s){s=s.trim();if(!s)return true;if(typeof v=="number"){let m=s.match(/^(>=|<=|>|<|=)\s*(\d+)$/);if(m){const n=+m[2],o=m[1];return o==">"?v>n:o=="<"?v<n:o==">="?v>=n:o=="<="?v<=n:v==n}m=s.match(/^(\d+)\s*-\s*(\d+)$/);if(m)return v>=+m[1]&&v<=+m[2]}return String(v).toLowerCase().includes(s.toLowerCase())}
+function build(){try{map=new Datamap({element:$("mapbox"),scope:"usa",fills:{defaultFill:"#ccc"},geographyConfig:{popupOnHover:false,highlightOnHover:false}});
+svgEl=document.querySelector("#mapbox svg");W=+svgEl.getAttribute("width")||$("mapbox").clientWidth;H=+svgEl.getAttribute("height")||$("mapbox").clientHeight;vb=[0,0,W,H];
+svgEl.setAttribute("viewBox",vb.join(" "));svgEl.removeAttribute("width");svgEl.removeAttribute("height");svgEl.style.height="auto";svgEl.style.aspectRatio=W+" / "+H;svgEl.style.minHeight="200px";
+const s=d3.select(svgEl);cG=s.append("g").style("pointer-events","none");labG=s.append("g").style("pointer-events","none");dotsG=s.append("g");
+d3.selectAll("#mapbox .datamaps-subunit").each(function(){const st=d3.select(this).attr("class").split(" ")[1];SUB[st]=this;const b=this.getBBox();if(b.width>16)labG.append("text").attr("x",b.x+b.width/2).attr("y",b.y+b.height/2+3).attr("text-anchor","middle").style("font","600 10px Barlow,sans-serif").style("fill","var(--ink)").text(st)})
+.on("click",function(){const st=d3.select(this).attr("class").split(" ")[1];go(sel==st?"":st)})
+.on("mousemove",function(){const st=d3.select(this).attr("class").split(" ")[1];tip(NAMES[st]+": "+(window._cnt[st]||0).toLocaleString()+" carriers")}).on("mouseleave",()=>tip())}
+catch(e){$("mapbox").innerHTML='<p class="note">The map could not load ('+esc(e.message)+'). The table below still works.</p>'}}
+function tip(t){const e=$("tip");if(!t){e.style.display="none";return}e.textContent=t;e.style.display="block";const ev=d3.event;e.style.left=ev.clientX+12+"px";e.style.top=ev.clientY+12+"px"}
+function view(to){const a=vb.slice(),t0=performance.now(),red=matchMedia("(prefers-reduced-motion:reduce)").matches;(function f(t){const k=red?1:Math.min(1,(t-t0)/450),e=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;vb=a.map((x,i)=>x+(to[i]-x)*e);svgEl.setAttribute("viewBox",vb.join(" "));adj();if(k<1)requestAnimationFrame(f)})(t0)}
+function adj(){const k=vb[2]/W;if(cG){cG.selectAll("path.rd").each(function(){this.style.strokeWidth=(this.getAttribute("data-t")=="1"?1.5:.8)*k+"px"})}dotsG.selectAll("circle").attr("r",3.6*k).attr("stroke-width",1.1*k);d3.selectAll("#mapbox .datamaps-subunit").style("stroke-width",.8*k+"px")}
+async function loadState(st,kind){const key=kind?st+"-o":st,file=kind?st+"-other":st;$("mn").textContent="Loading "+NAMES[st]+" …";try{const r=await fetch("data/"+file+".csv.gz?v="+(IDX._u||""));if(!r.ok)throw new Error("HTTP "+r.status);const u=new Uint8Array(await r.arrayBuffer());let t;if(u[0]==31&&u[1]==139){t=await new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream("gzip"))).text()}else t=new TextDecoder().decode(u);imp(csv(t),st,true);LOADED[key]=1}catch(e){$("mn").textContent="Could not load "+NAMES[st]+": "+e.message;LOADED[key]=0}}
+async function ensure(st){if(!st||!LIVE)return;if(!LOADED[st])await loadState(st);if($("fx").checked&&!LOADED[st+"-o"])await loadState(st,"other")}
+async function go(st){await ensure(st);go0(st)}
+function go0(st){sel=st;shown=100;open=null;if(svgEl){if(!st)view([0,0,W,H]);else{const b=SUB[st].getBBox();let w=b.width*1.25,h=b.height*1.25;if(w/h>W/H)h=w*H/W;else w=h*W/H;view([b.x+b.width/2-w/2,b.y+b.height/2-h/2,w,h])}}render()}
+function pos(c){if(c._p!==undefined)return c._p;let p=null;if(c.lat||c.lng){const q=map.latLngToXY(c.lat,c.lng);if(q&&isFinite(q[0]))p=q;c._ex=1}
+if(!p&&SUB[c.state]){const n=SUB[c.state],b=n.getBBox(),pt=svgEl.createSVGPoint(),j=(hh(c.dot)-.5)*b.width*.03;for(let i=0;i<40;i++){pt.x=b.x+hh(c.zip+c.city+"x"+i)*b.width+j;pt.y=b.y+hh(c.zip+c.city+"y"+i)*b.height+j;if(n.isPointInFill(pt)){p=[pt.x,pt.y];break}}}
+return c._p=p}
+function showDots(rows){if(!dotsG)return;dotsG.selectAll("*").remove();if(!sel)return;if(rows.length>1500)$("mn").textContent+=" Showing the first 1,500 dots – filter to narrow.";rows.slice(0,1500).forEach(c=>{const p=pos(c);if(!p)return;dotsG.append("circle").datum(c).attr("class","dot").attr("cx",p[0]).attr("cy",p[1]).style("fill",c.pend?"var(--amber)":c.status=="Active"?"var(--sign)":"#d0453a").style("stroke",c._i===open?"var(--amber)":"var(--panel)")
+.on("click",function(d){open=d._i;render();const r=document.querySelector("tr.on");if(r)r.scrollIntoView({block:"center",behavior:"smooth"})}).on("mousemove",function(d){tip(d.name+" – "+d.city+", "+d.state+(d._ex?"":" (approx. location)"))}).on("mouseleave",()=>tip())});
+adj();if(open!==null){const o=dotsG.selectAll("circle").filter(d=>d._i===open);o.each(function(){this.parentNode.appendChild(this)}).style("stroke-width",2.6*vb[2]/W+"px")}}
+function render(){const f=DATA.filter(match),cnt={};f.forEach(c=>cnt[c.state]=(cnt[c.state]||0)+1);if(LIVE)for(const s in IDX)if(s!="_u"&&!LOADED[s])cnt[s]=IDX[s];window._cnt=cnt;const mx=Math.max(1,...Object.values(cnt));
+let rows=f.filter(c=>(!sel||c.state==sel)&&COLS.every(([k])=>cmp(c[k],CF[k]||"")));
+rows.sort((a,b)=>{for(const[k,d]of sorts){const x=a[k],y=b[k],r=typeof x=="number"?x-y:String(x).localeCompare(String(y),undefined,{numeric:true,sensitivity:"base"});if(r)return r*d}return 0});
+if(map)d3.selectAll("#mapbox .datamaps-subunit").each(function(){const s=d3.select(this),st=s.attr("class").split(" ")[1],n=cnt[st]||0,l=n?Math.min(4,1+Math.floor(n/mx*3.99)):0;s.style("fill",sel?(st==sel?"var(--t1)":"var(--t0)"):"var(--t"+l+")").style("opacity",sel&&st!=sel?.55:1).style("stroke","var(--panel)").style("cursor",st==sel?"default":"pointer")});
+if(labG)labG.style("display",sel?"none":null);
+const nm=sel?NAMES[sel]:"All states";$("ttl").textContent=nm;$("mt").textContent=sel?NAMES[sel]:"United States";$("back").hidden=!sel;
+$("mn").textContent=sel?"Each dot is one carrier ("+rows.length.toLocaleString()+" shown). Green = active, amber = authority or insurance pending cancellation, red = inactive or out of service. Click a dot to open its record below.":"Click a state to zoom in and see every carrier as a dot at its address.";
+
+
+document.querySelectorAll("#hd th").forEach(th=>{const i=sorts.findIndex(s=>s[0]==th.dataset.k);if(i<0)th.removeAttribute("aria-sort");else th.setAttribute("aria-sort",sorts[i][1]>0?"ascending":"descending")});
+const vis=rows.slice(0,shown);
+$("tb").innerHTML=vis.map(c=>{const d=open===c._i;return`<tr data-i="${c._i}"${d?' class="on"':""}>`+COLS.map(([k])=>["status","auth","ins"].includes(k)&&c[k]?`<td><span class="pill${/^(Pend|Appl)/.test(c[k])?" warn":c[k]=="Active"?"":c[k]=="None"?" none":" bad"}">${esc(c[k])}</span></td>`:`<td>${esc(c[k])}</td>`).join("")+"</tr>"+(d?`<tr class="det"><td colspan="${COLS.length}"><div class="kv">${[["Legal name",c.name],["DBA",c.dba],["DOT #",c.dot],["MC #",c.mc],["Address",c.city+", "+c.state+" "+c.zip],["Map location",c._ex?"Exact (from coordinates)":"Approximate (from ZIP)"],["Phone",c.phone],["Email",c.email],["Status",c.status],["Entity type",c.type],["Operation",c.op],["For hire / private",c.hire],["Owner / officer",c.owner],["Second officer",c.owner2],...(c.x||[]),["Power units",c.trucks],["Drivers",c.drivers],["Inspections",c.insp||""],["Authority",c.auth],["Authority notice posted",c.apend],["Authority cancels on",c.acancel],["Authority notice type",c.atype],["Authority reinstated",c.reinst],["Insurance",c.ins],["Cancellation date",c.cdate],["Hazmat",c.hazmat=="Y"?"Yes":"No"],["MCS-150 date",c.mcs]].filter(x=>x[1]!=="").map(x=>`<div><small>${x[0]}</small>${esc(x[1])}</div>`).join("")}</div>${c.phone?`<p style="margin:10px 0 0"><button class="pri txbtn" data-i="${c._i}">Text this carrier</button></p>`:""}</td></tr>`:"")}).join("")||`<tr><td colspan="${COLS.length}">No carriers match. Clear a filter or pick another state.</td></tr>`;
+$("cnt").textContent=`Showing ${vis.length.toLocaleString()} of ${rows.length.toLocaleString()} · ${rows.filter(c=>c.pend).length.toLocaleString()} pending cancellation in this view`;$("more").hidden=rows.length<=shown;window._rows=rows;showDots(rows)}
+const deb=(f,ms)=>{let t;return()=>{clearTimeout(t);t=setTimeout(f,ms)}},RR=()=>{shown=100;open=null;render()},RD=deb(RR,300);
+$("hd").innerHTML=COLS.map(c=>`<th tabindex="0" data-k="${c[0]}">${c[1]}</th>`).join("");
+$("hf").innerHTML=COLS.map(c=>`<th><input class="cf" data-k="${c[0]}" aria-label="Filter ${c[1]}" placeholder="filter"></th>`).join("");
+const sortFn=e=>{const t=e.target.closest("th");if(!t||(e.type=="keydown"&&e.key!="Enter"))return;const k=t.dataset.k,i=sorts.findIndex(s=>s[0]==k);if(e.shiftKey){if(i<0)sorts.push([k,1]);else sorts[i][1]*=-1}else sorts=[[k,i==0?-sorts[0][1]:1]];render()};
+$("hd").onclick=sortFn;$("hd").onkeydown=sortFn;
+const hfD=deb(RR,300);$("hf").oninput=e=>{CF[e.target.dataset.k]=e.target.value;hfD()};
+$("tb").onclick=e=>{const r=e.target.closest("tr[data-i]");if(!r)return;open=open==+r.dataset.i?null:+r.dataset.i;render()};
+function vals(id){return[...$(id).selectedOptions].map(o=>o.value).filter(v=>v!=="")}
+/* Tick-box multi-select for the category filters: Status, Type, For hire, Operation, Hazmat, Authority, Insurance */
+const MS=["fs","ft","fc","fo","fh","fa","fi"];
+function msSync(id){const s=$(id),b=s.parentNode.querySelector(".msb"),p=s.parentNode.querySelector(".msp");if(!b)return;
+ const on=[...s.options].filter(o=>o.selected&&o.value!=="").map(o=>o.text);
+ b.textContent=!on.length?"Any":on.length==1?on[0]:on.join(", ").length<=20?on.join(", "):on.length+" selected";
+ p.querySelectorAll("input").forEach((c,i)=>{c.checked=[...s.options].filter(o=>o.value!=="")[i].selected})}
+MS.forEach(id=>{const s=$(id);s.multiple=true;s.hidden=true;s.tabIndex=-1;
+ const w=document.createElement("div");w.className="ms";const b=document.createElement("button");b.type="button";b.className="msb";b.setAttribute("aria-haspopup","listbox");
+ const p=document.createElement("div");p.className="msp";p.hidden=true;
+ const clr=document.createElement("div");clr.className="mso";clr.textContent="Any (clear)";p.appendChild(clr);
+ [...s.options].filter(o=>o.value!=="").forEach(o=>{const r=document.createElement("div");r.className="mso";const c=document.createElement("input");c.type="checkbox";r.appendChild(c);r.appendChild(document.createTextNode(" "+o.text));
+  r.onclick=e=>{if(e.target!==c)c.checked=!c.checked;o.selected=c.checked;msSync(id);s.dispatchEvent(new Event("input",{bubbles:true}));s.dispatchEvent(new Event("change",{bubbles:true}))};p.appendChild(r)});
+ clr.onclick=()=>{[...s.options].forEach(o=>o.selected=false);msSync(id);s.dispatchEvent(new Event("input",{bubbles:true}));s.dispatchEvent(new Event("change",{bubbles:true}))};
+ b.onclick=e=>{e.preventDefault();const was=p.hidden;document.querySelectorAll(".msp").forEach(x=>x.hidden=true);p.hidden=!was;if(!p.hidden){p.style.left="";p.style.right="";if(p.getBoundingClientRect().right>innerWidth-8){p.style.left="auto";p.style.right="0"}}};
+ const dn=document.createElement("div");dn.className="mso";dn.style.cssText="justify-content:center;font-weight:600;border-top:1px solid var(--line);margin-top:4px";dn.textContent="Done";dn.onclick=()=>{p.hidden=true};p.appendChild(dn);
+ w.appendChild(b);w.appendChild(p);s.after(w);[...s.options].forEach(o=>o.selected=false);msSync(id)});
+document.addEventListener("click",e=>{if(e.target.closest(".ms")||(e.target.tagName=="SELECT"&&e.target.multiple))return;document.querySelectorAll(".msp").forEach(x=>x.hidden=true)});
+document.addEventListener("keydown",e=>{if(e.key=="Escape")document.querySelectorAll(".msp").forEach(x=>x.hidden=true)});
+const FI=["q","fs","ft","fh","fc","fo","fa","fn","fi","fp","tmin","tmax","dmin","dmax","imin","imax"];
+FI.forEach(id=>$(id).addEventListener("input",["SELECT"].includes($(id).tagName)||$(id).type=="checkbox"?RR:RD));
+$("fx").addEventListener("change",async()=>{await ensure(sel);RR()});
+$("fs").addEventListener("change",async()=>{if(vals("fs").some(v=>v!="Active")&&!$("fx").checked){$("fx").checked=true;await ensure(sel);RR()}});
+$("more").onclick=()=>{shown+=100;render()};
+$("clr").onclick=()=>{FI.forEach(id=>$(id).value="");MS.forEach(msSync);$("fp").checked=false;$("fx").checked=false;CF={};document.querySelectorAll(".cf").forEach(i=>i.value="");shown=100;render()};
+$("back").onclick=()=>go("");document.addEventListener("keydown",e=>{if(e.key=="Escape"&&sel)go("")});
+$("imp").onclick=()=>$("file").click();
+$("file").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();if(/\.xlsx?$/i.test(f.name)){r.onload=()=>{const wb=XLSX.read(r.result,{type:"array"});imp(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:""}),f.name)};r.readAsArrayBuffer(f)}else{r.onload=()=>imp(csv(r.result),f.name);r.readAsText(f)}e.target.value=""};
+$("smp").onclick=()=>{LIVE=false;DATA=sample();$("src").textContent="Sample data loaded – import an FMCSA file to use real carriers";go("")};
+function tableRows(){return(window._rows||[]).map(c=>{const o={};COLS.forEach(([k,l])=>o[l]=c[k]);o["DBA"]=c.dba;o["MCS-150 date"]=c.mcs;return o})}
+function save(kind){const rows=tableRows();if(!rows.length)return alert("Nothing to export with the current filters.");const nm="carriers-"+(sel||"all-states");
+if(kind=="xlsx"){const ws=XLSX.utils.json_to_sheet(rows);ws["!cols"]=Object.keys(rows[0]).map(k=>({wch:Math.min(34,Math.max(k.length+2,...rows.slice(0,200).map(r=>String(r[k]).length+2)))}));ws["!autofilter"]={ref:ws["!ref"]};const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Carriers");XLSX.writeFile(wb,nm+".xlsx")}
+else{const k=Object.keys(rows[0]),t=[k.join(",")].concat(rows.map(r=>k.map(x=>'"'+String(r[x]).replace(/"/g,'""')+'"').join(","))).join("\n"),a=document.createElement("a");a.href=URL.createObjectURL(new Blob([t],{type:"text/csv"}));a.download=nm+".csv";a.click()}}
+$("xl").onclick=()=>save("xlsx");$("cv").onclick=()=>save("csv");
+window.addEventListener("error",e=>{$("mn").textContent="Page error: "+e.message});build();(async()=>{try{const j=await (await fetch("data/index.json?t="+Date.now())).json();if(j.states&&Object.keys(j.states).length){LIVE=true;IDX=Object.assign({_u:(j.updated||"").replace(/\W/g,"")},j.states);DATA=[];$("src").textContent="FMCSA data updated "+new Date(j.updated).toLocaleString()+" · click a state to load its carriers";const I=j.insurance,A=I&&I.authority;$("src").textContent+=I?(I.used?" · Insurance ("+I.used+"): "+(I.matched||0).toLocaleString()+" carriers matched, "+(I.pending||0).toLocaleString()+" pending, "+(I.cancelled||0).toLocaleString()+" cancelled"+(["qh9u-swkp","chgs-tx6x","y77m-3nfx"].includes(I.used)?" – OLD FILE, frozen May 14 2026":"")+(I.skipped?" ["+String(I.skipped).slice(0,220)+"]":""):" · Insurance NOT joined"+(I.error?" ("+String(I.error).slice(0,160)+")":"")):"";if(A)$("src").textContent+=A.used?" · Authority ("+A.used+"): "+(A.matched||0).toLocaleString()+" carriers matched, "+(A.pending||0).toLocaleString()+" pending":" · Authority NOT joined"+(A.error?" ("+String(A.error).slice(0,200)+")":"");$("src").insertAdjacentHTML("beforeend",' · <a href="data/diagnostics.json" target="_blank" style="color:#fff">data check</a>')}}catch(e){}
+if(!LIVE){DATA=sample();$("src").textContent="Sample data – the nightly job has not published real data yet"}render()})();
+
+/* ---- Text messaging through RingCentral (server side: netlify/functions/sms.js) ---- */
+(()=>{const E=id=>document.getElementById(id),FN="/.netlify/functions/sms";
+let busy=false,stop=false,log=[],armed=null,pick=null,accts=[];
+const ph=v=>{const d=String(v||"").replace(/\D/g,"");return d.length==10?"+1"+d:d.length==11&&d[0]=="1"?"+"+d:""};
+const code=()=>E("smsc").value.trim(),hd=()=>({"x-access-code":code()});
+const say=(t,bad)=>{const m=E("smsm");m.textContent=t;m.className="msg"+(bad?" err":"")};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const wait=async()=>{const ms=(+E("smsy").value||15)*1000*(0.7+Math.random()*0.6);for(let t=0;t<ms&&!stop;t+=250)await sleep(Math.min(250,ms-t))};
+const eta=n=>{const m=Math.ceil(n*(+E("smsy").value||15)/60);return m<2?"about a minute":m<120?"about "+m+" minutes":"about "+(m/60).toFixed(1)+" hours"};
+function targets(){const w=E("smsw").value;let list=w=="one"&&pick!=null?DATA.filter(c=>c._i==pick):(window._rows||[]);const seen=new Set(),out=[];let bad=0;
+ for(const c of list){const n=ph(c.phone);if(!n){bad++;continue}if(seen.has(n))continue;seen.add(n);out.push({c,n})}return{out,bad,total:list.length}}
+function opts(){const w=E("smsw"),keep=w.value;const T=window._rows||[];const n=T.filter(c=>ph(c.phone)).length;
+ w.innerHTML=(pick!=null?'<option value="one">The selected carrier</option>':"")+`<option value="view">All carriers in the current view (${n.toLocaleString()} with a phone number)</option>`;
+ if([...w.options].some(o=>o.value==keep))w.value=keep}
+function info(keep){if(!keep){armed=null;E("smsg").textContent="Send"}const t=targets();E("smsk").textContent=`${t.out.length.toLocaleString()} recipient${t.out.length==1?"":"s"}${t.bad?` · ${t.bad} skipped (no valid phone)`:""}. Up to 200 per batch. Estimated time: ${eta(t.out.length)} – keep this page open until it finishes.`;return t}
+async function loadAccounts(){const r=await fetch(FN+"?action=accounts",{headers:hd()}),j=await r.json();if(!r.ok)throw new Error(j.error||r.status);accts=j.accounts||[];
+ const a=E("smsa");a.innerHTML=accts.map(n=>`<option>${n.replace(/[<>&"]/g,"")}</option>`).join("");let want="";try{want=sessionStorage.getItem("smsa")||""}catch(e){}
+ if(accts.includes(want))a.value=want;else if(accts.length)a.selectedIndex=0;E("smsar").hidden=accts.length<2;E("smscl").textContent=accts.length<2?"Access code":"Access code for the user above"}
+async function loadNums(){const sel=E("smsf");if(!code())return say("Enter the access code first.",true);E("smsn").textContent="Loading…";sel.innerHTML="";
+ try{if(!accts.length)await loadAccounts();const acc=E("smsa").value;const r=await fetch(FN+"?action=numbers&account="+encodeURIComponent(acc),{headers:hd()}),j=await r.json();if(!r.ok)throw new Error(j.error||r.status);
+  sel.innerHTML=j.numbers.map(n=>`<option value="${n.number}">${n.number}${n.label?" – "+n.label.replace(/[<>&]/g,""):""}</option>`).join("");
+  if(j.numbers.length)sel.selectedIndex=0;E("smsn").textContent=j.numbers.length?`${j.numbers.length} number${j.numbers.length==1?"":"s"} for ${j.account}`:`No SMS-enabled numbers for ${j.account}.`;
+  try{sessionStorage.setItem("smsa",j.account)}catch(e){}say("")}
+ catch(e){E("smsn").textContent="";say("Could not load numbers: "+e.message,true)}}
+async function switchUser(reload){armed=null;E("smsg").textContent="Send";E("smsf").innerHTML="";E("smsn").textContent="";
+ try{if(reload||!accts.length)await loadAccounts()}catch(e){return say("Could not load RingCentral users: "+e.message,true)}
+ E("smsc").value="";say(accts.length>1?"Enter the access code for "+E("smsa").value+".":"Enter the access code.")}
+function openM(one){pick=one==null?null:one;opts();if(one!=null)E("smsw").value="one";E("smsbg").classList.add("on");info();say("");E("smsd").hidden=!log.length;
+ switchUser(true)}
+async function send1(from,n,text){for(let a=0;a<3;a++){const r=await fetch(FN,{method:"POST",headers:{"content-type":"application/json",...hd()},body:JSON.stringify({account:E("smsa").value,from,to:n,text})}),j=await r.json().catch(()=>({}));
+ if(r.ok)return j;if(r.status==429){await sleep(8000*(a+1));continue}throw new Error(j.error||"HTTP "+r.status)}throw new Error("Rate limited by RingCentral")}
+async function go(){if(busy){stop=true;return}
+ const from=E("smsf").value,body=E("smst").value.trim();if(!code())return say("Enter the access code.",true);if(!from)return say("Pick a From number (click Reload numbers).",true);if(!body)return say("Type a message.",true);
+ const t=info(true);if(!t.out.length)return say("No carriers with a valid phone number to text.",true);if(t.out.length>200)return say(`That is ${t.out.length.toLocaleString()} recipients. Narrow the filters to 200 or fewer per batch.`,true);
+ const key=from+"|"+body+"|"+t.out.length;if(armed!==key){armed=key;E("smsg").textContent=`Confirm – send ${t.out.length} text${t.out.length==1?"":"s"} from ${from}`;return say("Check the message, then click again to send. This cannot be undone.")}
+ armed=null;busy=true;stop=false;log=[];E("smsg").textContent="Stop";E("smsd").hidden=true;const P=E("smsp");P.hidden=false;P.max=t.out.length;P.value=0;let ok=0,fail=0;
+ const text=body;
+ for(let i=0;i<t.out.length&&!stop;i++){const{c,n}=t.out[i];let st="sent",er="";try{await send1(from,n,text);ok++}catch(e){st="failed";er=e.message;fail++}
+  log.push([new Date().toISOString(),c.name,c.dot,n,E("smsa").value,from,st,er]);P.value=i+1;say(`Sending ${i+1} of ${t.out.length} · ${ok} sent · ${fail} failed`,fail>0&&st=="failed");
+  if(st=="failed"&&/credential|access code|login/i.test(er)){stop=true}if(i<t.out.length-1)await wait()}
+ busy=false;E("smsg").textContent="Send";P.hidden=true;E("smsd").hidden=!log.length;
+ say(`${stop?"Stopped. ":"Done. "}${ok} sent, ${fail} failed${log.length?"":"."}${fail?" See the log for reasons.":""}`,fail>0)}
+function dl(){const q=v=>'"'+String(v).replace(/"/g,'""')+'"';const csv=[["time","carrier","dot","to","sent as","from","result","error"],...log].map(r=>r.map(q).join(",")).join("\r\n");
+ const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="text-log-"+new Date().toISOString().slice(0,10)+".csv";a.click()}
+E("sm").onclick=()=>openM(null);const closeM=()=>{if(!busy){E("smsbg").classList.remove("on");E("smsc").value="";E("smsf").innerHTML="";E("smsn").textContent=""}};E("smsx").onclick=closeM;E("smsl").onclick=loadNums;E("smsg").onclick=go;E("smsd").onclick=dl;
+E("smsw").onchange=()=>info();E("smsy").onchange=()=>info();E("smst").oninput=()=>{armed=null;E("smsg").textContent="Send"};E("smsc").onchange=()=>{if(code())loadNums()};E("smsa").onchange=()=>switchUser(false);
+document.addEventListener("click",e=>{const b=e.target.closest&&e.target.closest(".txbtn");if(b)openM(+b.dataset.i)});
+document.addEventListener("keydown",e=>{if(e.key=="Escape")closeM()});
+})();
+</script></body></html>
