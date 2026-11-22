@@ -30,7 +30,9 @@ exports.handler = async (ev) => {
   try {
     if (ev.httpMethod !== "POST") return { statusCode: 405, body: "" };
     const h = ev.headers || {};
-    if (!process.env.TG_WEBHOOK_SECRET || !same(h["x-telegram-bot-api-secret-token"], process.env.TG_WEBHOOK_SECRET)) return { statusCode: 401, body: "" };
+    console.log("tg: request received");
+    if (!process.env.TG_WEBHOOK_SECRET) { console.error("tg: 401 because TG_WEBHOOK_SECRET is not set in Netlify (or the site was not redeployed after adding it)"); return { statusCode: 401, body: "" }; }
+    if (!same(h["x-telegram-bot-api-secret-token"], process.env.TG_WEBHOOK_SECRET)) { console.error("tg: 401 because the secret_token Telegram sent does not match TG_WEBHOOK_SECRET (sent length " + String(h["x-telegram-bot-api-secret-token"] || "").length + ", expected length " + process.env.TG_WEBHOOK_SECRET.length + ")"); return { statusCode: 401, body: "" }; }
     const secret = process.env.SESSION_SECRET;
     if (!secret || secret.length < 16 || !process.env.TG_BOT_TOKEN) { console.error("tg: SESSION_SECRET (16+ chars) and TG_BOT_TOKEN must be set"); return ok; }
     const m = (JSON.parse(ev.body || "{}")).message;
