@@ -1,9 +1,6 @@
 name: Probe FMCSA datasets
 on:
   workflow_dispatch:
-defaults:
-  run:
-    working-directory: ""
 jobs:
   probe:
     runs-on: ubuntu-latest
