@@ -3,28 +3,35 @@
 //   GET  ?action=accounts                    -> names of the configured RingCentral users
 //   GET  ?action=numbers&account=NAME        -> SMS-capable numbers of that user
 //   POST {account,from,to,text}              -> sends one text message as that user
-// The Netlify gate already requires a valid website key; SMS_ACCESS_CODE is a second password for this panel.
-// Netlify variables: RC_CLIENT_ID, RC_CLIENT_SECRET, SMS_ACCESS_CODE, RC_SERVER_URL (optional)
-//   One user:   RC_JWT                              (shown as "Main", or RC_MAIN_NAME)
-//   More users: RC_ACCOUNTS=Alice,Bob  plus  RC_JWT_ALICE, RC_JWT_BOB   (variable name = RC_JWT_ + NAME in capitals)
+// Every RingCentral user has their OWN access code, so nobody can send from somebody else's phone number.
+// Netlify variables: RC_CLIENT_ID, RC_CLIENT_SECRET, RC_SERVER_URL (optional)
+//   Main user:  RC_JWT  + SMS_ACCESS_CODE   (shown as "Main", or RC_MAIN_NAME; its code may also be RC_CODE_MAIN)
+//   More users: RC_ACCOUNTS=Alice,Bob  plus  RC_JWT_ALICE, RC_JWT_BOB  and their codes  RC_CODE_ALICE, RC_CODE_BOB
+//               (variable name = prefix + NAME in capitals). A user with no code set cannot be used.
 const crypto = require("crypto");
 const SERVER = (process.env.RC_SERVER_URL || "https://platform.ringcentral.com").replace(/\/$/, "");
 const tokens = {};   // cached access tokens per account name
 
 const json = (code, obj) => ({ statusCode: code, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(obj) });
 
-function codeOk(given) {
-  const want = process.env.SMS_ACCESS_CODE || "";
-  if (!want || !given) return false;
-  const a = crypto.createHash("sha256").update(String(given)).digest(), b = crypto.createHash("sha256").update(want).digest();
-  return crypto.timingSafeEqual(a, b);
+const nameKey = n => String(n).toUpperCase().replace(/[^A-Z0-9]/g, "_");
+const codeFor = a => process.env["RC_CODE_" + nameKey(a.name)] || (a.main ? process.env.SMS_ACCESS_CODE : "") || "";
+const fails = {};   // wrong-code counter per user (kept while the function stays warm)
+function checkCode(a, given) {
+  const want = codeFor(a), f = fails[a.name] || (fails[a.name] = { n: 0, until: 0 });
+  if (!want) throw Object.assign(new Error(`No access code is set for ${a.name} in Netlify (RC_CODE_${nameKey(a.name)}).`), { status: 403 });
+  if (Date.now() < f.until) throw Object.assign(new Error("Too many wrong codes. Try again in a few minutes."), { status: 429 });
+  const h = v => crypto.createHash("sha256").update(String(v)).digest();
+  if (given && crypto.timingSafeEqual(h(given), h(want))) { f.n = 0; return; }
+  if (++f.n >= 8) { f.until = Date.now() + 5 * 60000; f.n = 0; }
+  throw Object.assign(new Error(`Wrong access code for ${a.name}.`), { status: 401 });
 }
 
 function accounts() {
   const list = [];
-  if (process.env.RC_JWT) list.push({ name: (process.env.RC_MAIN_NAME || "Main").trim(), jwt: process.env.RC_JWT });
+  if (process.env.RC_JWT) list.push({ name: (process.env.RC_MAIN_NAME || "Main").trim(), jwt: process.env.RC_JWT, main: true });
   for (const n of (process.env.RC_ACCOUNTS || "").split(",").map(s => s.trim()).filter(Boolean)) {
-    const jwt = process.env["RC_JWT_" + n.toUpperCase().replace(/[^A-Z0-9]/g, "_")];
+    const jwt = process.env["RC_JWT_" + nameKey(n)];
     if (jwt && !list.some(a => a.name.toLowerCase() === n.toLowerCase())) list.push({ name: n, jwt });
   }
   return list;
@@ -64,12 +71,12 @@ const e164 = v => { const d = String(v || "").replace(/\D/g, ""); return d.lengt
 
 exports.handler = async (ev) => {
   try {
-    if (!codeOk(ev.headers["x-access-code"] || ev.headers["X-Access-Code"])) return json(401, { error: "Wrong or missing access code." });
-    const q = ev.queryStringParameters || {};
+    const q = ev.queryStringParameters || {}, given = (ev.headers || {})["x-access-code"] || (ev.headers || {})["X-Access-Code"];
     if (ev.httpMethod === "GET") {
-      if (q.action === "accounts") return json(200, { accounts: accounts().map(a => a.name) });
+      if (q.action === "accounts") return json(200, { accounts: accounts().map(a => a.name) });   // names only, no code needed
       if (q.action !== "numbers") return json(400, { error: "Unknown action." });
       const a = pick(q.account);
+      checkCode(a, given);
       let recs = [], page = 1;
       for (;;) {
         const j = await rc(a, `/restapi/v1.0/account/~/extension/~/phone-number?perPage=100&page=${page}`);
@@ -82,7 +89,9 @@ exports.handler = async (ev) => {
       return json(200, { account: a.name, numbers, total: recs.length });
     }
     if (ev.httpMethod === "POST") {
-      const b = JSON.parse(ev.body || "{}"), a = pick(b.account), from = e164(b.from), to = e164(b.to), text = String(b.text || "").trim();
+      const b = JSON.parse(ev.body || "{}"), a = pick(b.account);
+      checkCode(a, given);
+      const from = e164(b.from), to = e164(b.to), text = String(b.text || "").trim();
       if (!from) return json(400, { error: "Pick a valid sender number." });
       if (!to) return json(400, { error: "Invalid recipient number." });
       if (!text || text.length > 1000) return json(400, { error: "Message must be 1-1000 characters." });
