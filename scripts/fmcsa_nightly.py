@@ -141,7 +141,7 @@ def parse_date(s):
 
 DETAIL_RE = re.compile(r"insur|polic|effective|posted|limit|max|underl|company|form|type", re.I)
 DIAG = {}
-MATCH = [0, 0]
+MATCH = [0, 0, 0, 0, 0]
 
 
 def _key(r, dot, dock):
@@ -267,31 +267,50 @@ def _load_ins(ds):
         return {}, d
     d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
     print("Insurance sample rows:", json.dumps(d["sample"])[:900])
-    today, out, seen, parsed = dt.date.today(), {}, 0, 0
+    today, rec, seen, parsed = dt.date.today(), {}, 0, 0
+    eff = next((c for c in detail if "effective" in c), None)
+    fc = next((c for c in detail if "form" in c), None)
     sel = ",".join(dict.fromkeys(x for x in [dot, dock, canc] + detail if x))
     for r in pull(ds, select=sel):
         seen += 1
-        k = str(r.get(dot, "")).strip().lstrip("0") if dot else ""
-        if not k and dock:
-            dd = re.sub(r"\D", "", str(r.get(dock, ""))).lstrip("0")
-            k = "mc" + dd if dd else ""
+        k = _key(r, dot, dock)
         if not k:
             continue
-        o = out.setdefault(k, {"insurance_status": "Active", "cancel_effective_date": ""})
-        for c in detail:
-            v = str(r.get(c, "") or "").strip()
-            if v:
-                o["ins_" + c] = v
+        grp = "b" if fc and "91" in str(r.get(fc, "")) else "o"   # BMC-91 / 91X = liability (BIPD) filings
+        s = rec.setdefault((k, grp), {"open": False, "future": None, "past": None, "eff": dt.date.min, "det": {}})
         c = parse_date(r.get(canc))
+        if c and c >= dt.date(2100, 1, 1):
+            c = None
         if c:
             parsed += 1
-        if c and today <= c < dt.date(2100, 1, 1):
-            o["insurance_status"] = "Pending cancellation"
-            if not o["cancel_effective_date"] or c.isoformat() < o["cancel_effective_date"]:
-                o["cancel_effective_date"] = c.isoformat()
+            if c >= today:
+                s["future"] = c if s["future"] is None else min(s["future"], c)
+            else:
+                s["past"] = c if s["past"] is None else max(s["past"], c)
+        else:
+            s["open"] = True
+        e = parse_date(r.get(eff)) if eff else None
+        if e is None or e >= s["eff"]:
+            s["eff"] = e or s["eff"]
+            s["det"] = {"ins_" + x: str(r.get(x, "") or "").strip() for x in detail if str(r.get(x, "") or "").strip()}
+    pick = {}
+    for (k, g), s in rec.items():
+        if g == "b" or k not in pick:
+            pick[k] = s
+    out = {}
+    for k, s in pick.items():
+        if s["open"]:
+            st, cd = "Active", ""
+        elif s["future"]:
+            st, cd = "Pending cancellation", s["future"].isoformat()
+        else:
+            st, cd = "Cancelled", s["past"].isoformat() if s["past"] else ""
+        out[k] = {"insurance_status": st, "cancel_effective_date": cd, **s["det"]}
     d.update(rows=seen, with_cancel_date=parsed, carriers=len(out),
-             pending=sum(v["insurance_status"] != "Active" for v in out.values()))
-    print(f"Insurance rows read: {seen}; with a cancel date: {parsed}; carriers: {len(out)}; pending cancellation: {d['pending']}")
+             pending=sum(v["insurance_status"] == "Pending cancellation" for v in out.values()),
+             cancelled=sum(v["insurance_status"] == "Cancelled" for v in out.values()))
+    print(f"Insurance rows read: {seen}; with a cancel date: {parsed}; carriers: {len(out)}; "
+          f"pending cancellation: {d['pending']}; cancelled: {d['cancelled']}")
     return out, d
 
 
@@ -349,6 +368,9 @@ def run(a):
             r.update(v)
             MATCH[0] += 1 if "insurance_status" in r else 0
             MATCH[1] += 1 if "authority_status" in r else 0
+            MATCH[2] += 1 if r.get("insurance_status") == "Pending cancellation" else 0
+            MATCH[3] += 1 if r.get("authority_status") == "Pending cancellation" else 0
+            MATCH[4] += 1 if r.get("insurance_status") == "Cancelled" else 0
         act = [r for r in rows if r.get("STATUS_CODE", "A") == "A"]
         oth = [r for r in rows if r.get("STATUS_CODE", "A") != "A"]
         for name, part in ((st, act), (st + "-other", oth)):
@@ -370,7 +392,7 @@ def run(a):
     old.update(summary)
     used = DIAG.get("used")
     d = DIAG.get("details", {}).get(used, {}) if used else {}
-    summ = {"used": used, "carriers": d.get("carriers"), "pending": d.get("pending"), "matched": MATCH[0], "authority": {"used": DIAG.get("authority", {}).get("used"), "matched": MATCH[1], "pending_source": DIAG.get("authority", {}).get("pending_source", {}).get("used")},
+    summ = {"used": used, "carriers": d.get("carriers"), "pending": MATCH[2], "cancelled": MATCH[4], "pending_nationwide": d.get("pending"), "matched": MATCH[0], "authority": {"used": DIAG.get("authority", {}).get("used"), "matched": MATCH[1], "pending": MATCH[3], "error": None if DIAG.get("authority", {}).get("used") else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("authority", {}).get("tried", [])), "pending_source": DIAG.get("authority", {}).get("pending_source", {}).get("used")},
             "error": None if used else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("tried", []))}
     json.dump({"updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "states": old, "insurance": summ}, open(idx, "w"))
     json.dump(DIAG, open(os.path.join(a.out, "diagnostics.json"), "w"), indent=1)
@@ -388,7 +410,7 @@ def main():
     r.add_argument("--geocode-status", default="A", help="comma list of status codes to geocode (default A = active; '' = all)")
     r.add_argument("--max-geocode", type=int, default=150000, help="max new addresses to geocode per run")
     r.add_argument("--cache", default="geocache.json")
-    r.add_argument("--ins-dataset", default="c5y8-a4uz,qh9u-swkp,chgs-tx6x", help="comma list of insurance dataset ids (Motus first, then legacy); first that works is used")
+    r.add_argument("--ins-dataset", default="c5y8-a4uz,qh9u-swkp", help="comma list of insurance dataset ids; first that works is used. qh9u-swkp is the old L&I file, frozen at May 14 2026; it is only a fallback and the page warns when it is used")
     r.add_argument("--auth-dataset", default="yu5v-wbh6", help="authority history dataset (Motus AuthHist)")
     r.add_argument("--pend-dataset", default="wb4f-neki", help="revoke/suspend orders dataset (Motus RevokeSuspend)")
     r.add_argument("--no-authority", action="store_true")
