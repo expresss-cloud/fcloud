@@ -204,11 +204,13 @@ def load_authority(auth_ds, order_ds):
             n += 1
             k, day = key_of(r), parse_date(r.get("order1_effective_date"))
             if k and day and today <= day < dt.date(2100, 1, 1) and (k not in pend or day < pend[k][0]):
-                pend[k] = (day, str(r.get("order1_type_desc", "")))
-        for k, (day, desc) in pend.items():
+                pend[k] = (day, str(r.get("order1_type_desc", "")), parse_date(r.get("order1_serve_date")))
+        for k, (day, desc, served) in pend.items():
             if out.get(k, {}).get("authority_status", "Active") == "Active":
-                out.setdefault(k, {}).update(authority_status="Pending cancellation", ins_authority_pending_date=day.isoformat(),
-                                             ins_authority_pending_type=desc)
+                row = out.setdefault(k, {})
+                row.update(authority_status="Pending cancellation", authority_cancel_date=day.isoformat(), authority_pending_type=desc)
+                if served:
+                    row["authority_pending_date"] = served.isoformat()   # date the cancellation notice was posted (served)
         diag["orders_rows"], diag["pending_orders"] = n, len(pend)
         print(f"Suspension/revocation orders: {n} rows; pending (future effective date): {len(pend)}")
     except (Exception, SystemExit) as e:
