@@ -141,7 +141,113 @@ def parse_date(s):
 
 DETAIL_RE = re.compile(r"insur|polic|effective|posted|limit|max|underl|company|form|type", re.I)
 DIAG = {}
-MATCH = [0]
+MATCH = [0, 0]
+
+
+def _key(r, dot, dock):
+    k = str(r.get(dot, "")).strip().lstrip("0") if dot else ""
+    if not k and dock:
+        dd = re.sub(r"\D", "", str(r.get(dock, ""))).lstrip("0")
+        k = "mc" + dd if dd else ""
+    return k
+
+
+def _cols(have):
+    dot = next((c for c in ("dot_number", "usdot_number", "usdot", "dot", "dot_no") if c in have), None) \
+        or next((c for c in have if "dot" in c), None)
+    return dot, next((c for c in have if "docket" in c), None)
+
+
+def _first(cands, fn):
+    diag = {"tried": []}
+    for ds in cands:
+        ds = ds.strip()
+        if not ds:
+            continue
+        try:
+            out, d = fn(ds)
+        except (Exception, SystemExit) as e:
+            diag["tried"].append({"dataset": ds, "error": (str(e) or repr(e))[:300]})
+            print("Dataset", ds, "failed:", e, file=sys.stderr)
+            continue
+        diag["tried"].append({k: v for k, v in d.items() if k != "sample"})
+        diag.setdefault("details", {})[ds] = d
+        if out:
+            diag["used"] = ds
+            return out, diag
+    return {}, diag
+
+
+def _load_authority(ds):
+    """Authority status history (Motus AuthHist). Latest status per authority type; last 'reinstated' date."""
+    have = fields(ds)
+    dot, dock = _cols(have)
+    typ = next((c for c in have if "auth_type" in c or c.endswith("_type")), None)
+    st = next((c for c in have if "auth_status" in c), None) or next((c for c in have if "status" in c and "date" not in c), None)
+    rs = next((c for c in have if c == "reason" or "reason" in c), None)
+    dc = next((c for c in have if "status_change_date" in c), None) or next((c for c in have if "date" in c), None)
+    d = {"dataset": ds, "columns": have, "dot": dot, "docket": dock, "type": typ, "status": st, "reason": rs, "date": dc}
+    print(f"Authority dataset {ds}: columns {', '.join(have)}")
+    if not st or not dc or not (dot or dock):
+        d["error"] = "could not find status, date and DOT/docket columns"
+        return {}, d
+    d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
+    print("Authority sample rows:", json.dumps(d["sample"])[:700])
+    sel = ",".join(dict.fromkeys(x for x in (dot, dock, typ, st, rs, dc) if x))
+    latest, reinst, seen = {}, {}, 0
+    for r in pull(ds, select=sel):
+        seen += 1
+        k = _key(r, dot, dock)
+        day = parse_date(r.get(dc))
+        if not k or not day:
+            continue
+        sv = str(r.get(st, "")).lower()
+        tv = str(r.get(typ, "")) if typ else ""
+        cur = latest.setdefault(k, {})
+        if tv not in cur or day >= cur[tv][0]:
+            cur[tv] = (day, sv)
+        if rs and "reinstat" in str(r.get(rs, "")).lower() and day >= reinst.get(k, dt.date.min):
+            reinst[k] = day
+    out = {}
+    for k, types in latest.items():
+        act = any("active" in s and "inactive" not in s for _, s in types.values())
+        out[k] = {"authority_status": "Active" if act else "Inactive", "reinstated_date": reinst[k].isoformat() if k in reinst else ""}
+    d.update(rows=seen, carriers=len(out), active=sum(v["authority_status"] == "Active" for v in out.values()),
+             reinstated=len(reinst))
+    print(f"Authority rows: {seen}; carriers: {len(out)}; active: {d['active']}; with reinstated date: {len(reinst)}")
+    return out, d
+
+
+def _load_pending_auth(ds):
+    """Suspension/revocation orders already served but not yet effective = authority pending cancellation."""
+    have = fields(ds)
+    dot, dock = _cols(have)
+    ec = next((c for c in have if "effective" in c and "date" in c), None) or next((c for c in have if "effective" in c), None)
+    d = {"dataset": ds, "columns": have, "dot": dot, "docket": dock, "effective": ec}
+    print(f"Revoke/suspend dataset {ds}: columns {', '.join(have)}")
+    if not ec or not (dot or dock):
+        d["error"] = "could not find effective-date and DOT/docket columns"
+        return {}, d
+    d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
+    today, out, seen = dt.date.today(), {}, 0
+    for r in pull(ds, select=",".join(dict.fromkeys(x for x in (dot, dock, ec) if x))):
+        seen += 1
+        k, day = _key(r, dot, dock), parse_date(r.get(ec))
+        if k and day and today <= day < dt.date(2100, 1, 1):
+            o = out.setdefault(k, {"authority_status": "Pending cancellation", "ins_authority_pending_date": day.isoformat()})
+            o["ins_authority_pending_date"] = min(o["ins_authority_pending_date"], day.isoformat())
+    d.update(rows=seen, carriers=len(out))
+    print(f"Revoke/suspend rows: {seen}; pending (future effective date): {len(out)}")
+    return out, d
+
+
+def load_authority(cands, pend_cands):
+    out, diag = _first(cands, _load_authority)
+    pend, pdiag = _first(pend_cands, _load_pending_auth)
+    for k, v in pend.items():
+        out.setdefault(k, {}).update(v)
+    diag["pending_source"] = pdiag
+    return out, diag
 
 
 def _load_ins(ds):
@@ -190,20 +296,7 @@ def _load_ins(ds):
 
 
 def load_insurance(candidates):
-    diag = {"tried": []}
-    for ds in candidates:
-        try:
-            out, d = _load_ins(ds.strip())
-        except (Exception, SystemExit) as e:
-            diag["tried"].append({"dataset": ds, "error": str(e)[:300] or repr(e)[:300]})
-            print("Insurance dataset", ds, "failed:", e, file=sys.stderr)
-            continue
-        diag["tried"].append({k: v for k, v in d.items() if k != "sample"})
-        diag.setdefault("details", {})[ds] = d
-        if out:
-            diag["used"] = ds
-            return out, diag
-    return {}, diag
+    return _first(candidates, _load_ins)
 
 
 def run(a):
@@ -219,6 +312,10 @@ def run(a):
         ins, dg = load_insurance(a.ins_dataset.split(","))
         DIAG.update(dg)
         for d, v in ins.items():
+            li.setdefault(d, {}).update(v)
+    if not a.no_authority:
+        auth, DIAG["authority"] = load_authority(a.auth_dataset.split(","), a.pend_dataset.split(","))
+        for d, v in auth.items():
             li.setdefault(d, {}).update(v)
     cpath = a.cache
     cache = json.load(open(cpath)) if os.path.exists(cpath) else {}
@@ -246,8 +343,12 @@ def run(a):
             g = cache.get(r.get("_k", "")) or ["", ""]
             r["LATITUDE"], r["LONGITUDE"] = g
             mc = re.sub(r"\D", "", r.get("DOCKET1", "")).lstrip("0")
-            r.update(li.get(r["DOT_NUMBER"].lstrip("0")) or (li.get("mc" + mc) if mc else None) or {})
+            v = {}
+            v.update(li.get("mc" + mc, {}) if mc else {})
+            v.update(li.get(r["DOT_NUMBER"].lstrip("0"), {}))
+            r.update(v)
             MATCH[0] += 1 if "insurance_status" in r else 0
+            MATCH[1] += 1 if "authority_status" in r else 0
         act = [r for r in rows if r.get("STATUS_CODE", "A") == "A"]
         oth = [r for r in rows if r.get("STATUS_CODE", "A") != "A"]
         for name, part in ((st, act), (st + "-other", oth)):
@@ -269,7 +370,7 @@ def run(a):
     old.update(summary)
     used = DIAG.get("used")
     d = DIAG.get("details", {}).get(used, {}) if used else {}
-    summ = {"used": used, "carriers": d.get("carriers"), "pending": d.get("pending"), "matched": MATCH[0],
+    summ = {"used": used, "carriers": d.get("carriers"), "pending": d.get("pending"), "matched": MATCH[0], "authority": {"used": DIAG.get("authority", {}).get("used"), "matched": MATCH[1], "pending_source": DIAG.get("authority", {}).get("pending_source", {}).get("used")},
             "error": None if used else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("tried", []))}
     json.dump({"updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "states": old, "insurance": summ}, open(idx, "w"))
     json.dump(DIAG, open(os.path.join(a.out, "diagnostics.json"), "w"), indent=1)
@@ -287,7 +388,10 @@ def main():
     r.add_argument("--geocode-status", default="A", help="comma list of status codes to geocode (default A = active; '' = all)")
     r.add_argument("--max-geocode", type=int, default=150000, help="max new addresses to geocode per run")
     r.add_argument("--cache", default="geocache.json")
-    r.add_argument("--ins-dataset", default="qh9u-swkp,chgs-tx6x,y77m-3nfx", help="comma list of insurance dataset ids; first one that works is used")
+    r.add_argument("--ins-dataset", default="c5y8-a4uz,qh9u-swkp,chgs-tx6x", help="comma list of insurance dataset ids (Motus first, then legacy); first that works is used")
+    r.add_argument("--auth-dataset", default="yu5v-wbh6", help="authority history dataset (Motus AuthHist)")
+    r.add_argument("--pend-dataset", default="wb4f-neki", help="revoke/suspend orders dataset (Motus RevokeSuspend)")
+    r.add_argument("--no-authority", action="store_true")
     r.add_argument("--no-insurance", action="store_true")
     r.add_argument("--no-geocode", action="store_true")
     r.add_argument("--retry-misses", action="store_true", help="retry addresses the geocoder could not match")
