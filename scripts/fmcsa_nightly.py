@@ -130,13 +130,19 @@ def load_li(a):
 
 
 def parse_date(s):
-    s = str(s or "").strip()[:10]
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-        try:
-            return dt.datetime.strptime(s, fmt).date()
-        except ValueError:
-            pass
-    return None
+    s = str(s or "").strip()
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", s) or re.match(r"(\d{4})(\d{2})(\d{2})(?!\d)", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+    else:
+        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+        if not m:
+            return None
+        mo, d, y = map(int, m.groups())
+    try:
+        return dt.date(y, mo, d)
+    except ValueError:
+        return None
 
 
 DETAIL_RE = re.compile(r"insur|polic|effective|posted|limit|max|underl|company|form|type", re.I)
@@ -194,11 +200,13 @@ def _load_authority(ds):
     d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
     print("Authority sample rows:", json.dumps(d["sample"])[:700])
     sel = ",".join(dict.fromkeys(x for x in (dot, dock, typ, st, rs, dc) if x))
-    latest, reinst, seen = {}, {}, 0
+    latest, reinst, seen, nkey, nday = {}, {}, 0, 0, 0
     for r in pull(ds, select=sel):
         seen += 1
         k = _key(r, dot, dock)
         day = parse_date(r.get(dc))
+        nkey += 1 if k else 0
+        nday += 1 if day else 0
         if not k or not day:
             continue
         sv = str(r.get(st, "")).lower()
@@ -208,6 +216,9 @@ def _load_authority(ds):
             cur[tv] = (day, sv)
         if rs and "reinstat" in str(r.get(rs, "")).lower() and day >= reinst.get(k, dt.date.min):
             reinst[k] = day
+    if not latest:
+        d.update(rows=seen, error=f"read {seen} rows; {nkey} had a DOT/docket number, {nday} had a readable date in '{dc}'")
+        return {}, d
     out = {}
     for k, types in latest.items():
         act = any("active" in s and "inactive" not in s for _, s in types.values())
@@ -393,14 +404,46 @@ def run(a):
     used = DIAG.get("used")
     d = DIAG.get("details", {}).get(used, {}) if used else {}
     summ = {"used": used, "carriers": d.get("carriers"), "pending": MATCH[2], "cancelled": MATCH[4], "pending_nationwide": d.get("pending"), "matched": MATCH[0], "authority": {"used": DIAG.get("authority", {}).get("used"), "matched": MATCH[1], "pending": MATCH[3], "error": None if DIAG.get("authority", {}).get("used") else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("authority", {}).get("tried", [])), "pending_source": DIAG.get("authority", {}).get("pending_source", {}).get("used")},
-            "error": None if used else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("tried", []))}
+            "skipped": "; ".join(f"{x.get('dataset')}: {x.get('error')}" for x in DIAG.get("tried", []) if x.get("error") and x.get("dataset") != used), "error": None if used else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("tried", []))}
     json.dump({"updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "states": old, "insurance": summ}, open(idx, "w"))
     json.dump(DIAG, open(os.path.join(a.out, "diagnostics.json"), "w"), indent=1)
+
+
+PROBE_DEFAULT = ("az4n-8mr2,c5y8-a4uz,x96h-evps,3uet-3z4i,yu5v-wbh6,dm5j-zc6c,wb4f-neki,inys-ebih,qh9u-swkp")
+
+
+def probe(a):
+    """Print columns, row count and sample rows for each dataset (to the log and the run summary page)."""
+    lines = ["# FMCSA dataset probe", ""]
+    for ds in a.datasets.split(","):
+        ds = ds.strip()
+        lines += [f"## {ds}"]
+        try:
+            cols = get(f"{BASE}/api/views/{ds}/columns.json").json()
+            lines.append("columns: " + ", ".join(f"{c['fieldName']} ({c.get('dataTypeName', '?')})" for c in cols))
+        except (Exception, SystemExit) as e:
+            lines += [f"COLUMNS FAILED: {e}", ""]
+            continue
+        for label, params in (("row count", {"$select": "count(*)"}), ("first rows", {"$limit": 3}),
+                              ("later rows", {"$limit": 3, "$offset": 200000})):
+            try:
+                lines.append(f"{label}: " + json.dumps(get(f"{BASE}/resource/{ds}.json", params=params).json())[:2500])
+            except (Exception, SystemExit) as e:
+                lines.append(f"{label} FAILED: {e}")
+        lines.append("")
+    text = "\n".join(lines)
+    print(text)
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a", encoding="utf-8") as f:
+            f.write(text.replace("\n", "\n\n"))
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     s = p.add_subparsers(dest="cmd", required=True)
+    pr = s.add_parser("probe", help="print columns and sample rows of datasets")
+    pr.add_argument("--datasets", default=PROBE_DEFAULT)
     c = s.add_parser("columns", help="list a dataset's column names")
     c.add_argument("dataset")
     r = s.add_parser("run", help="pull, geocode and write state files")
@@ -420,7 +463,9 @@ def main():
     r.add_argument("--li", help="Licensing & Insurance dataset id to join by DOT number")
     r.add_argument("--li-dot"), r.add_argument("--li-auth"), r.add_argument("--li-ins"), r.add_argument("--li-date")
     a = p.parse_args()
-    if a.cmd == "columns":
+    if a.cmd == "probe":
+        probe(a)
+    elif a.cmd == "columns":
         print("\n".join(fields(a.dataset)))
     else:
         run(a)
