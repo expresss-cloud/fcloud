@@ -2,23 +2,20 @@
 """
 FMCSA nightly data job for the Carrier Map.
 
-What it does, each run:
-  1. Pulls the FMCSA Company Census File (data.transportation.gov, dataset az4n-8mr2) one state at a time.
-  2. Optionally joins authority / insurance status from a Licensing & Insurance dataset (--li ...).
-  3. Geocodes new or changed addresses with the free US Census batch geocoder (results are cached).
-  4. Writes data/<ST>.csv.gz (active carriers) and data/<ST>-other.csv.gz (inactive/other) and data/index.json, replacing files atomically.
-The CSVs use the column names the Carrier Map already imports (LATITUDE / LONGITUDE included).
+Each run, for every state:
+  1. Pulls the Company Census File (az4n-8mr2) - ALL statuses (active, inactive, other).
+  2. Joins insurance:  Motus Insur (c5y8-a4uz, current filings) + Motus InsHist (3uet-3z4i, cancelled/replaced policies)
+  3. Joins authority:  Motus AuthHist (yu5v-wbh6, status history) + Motus RevokeSuspend (wb4f-neki, pending suspensions)
+  4. Geocodes addresses with the free US Census geocoder (cached between runs).
+  5. Writes data/<ST>.csv.gz (active carriers), data/<ST>-other.csv.gz (inactive/other), data/index.json, data/diagnostics.json
 
-Pending insurance cancellation comes from FMCSA's ActPendInsur dataset (cancel effective date).
-Setup:   pip install requests
-First look at a dataset's column names:   python fmcsa_nightly.py columns az4n-8mr2
-Try one state:                            python fmcsa_nightly.py run --states UT --out data
-Everything:                               python fmcsa_nightly.py run --out data
-Nightly (cron, 3:15 am):                  15 3 * * *  cd /path/to/job && python3 fmcsa_nightly.py run --out /var/www/data >> job.log 2>&1
+Commands:
+  python fmcsa_nightly.py run --states UT --out data      one state
+  python fmcsa_nightly.py run --out data                  everything
+  python fmcsa_nightly.py probe                           print columns + sample rows of the FMCSA datasets
+  python fmcsa_nightly.py columns <dataset-id>
 
-Optional environment variables:
-  SOCRATA_APP_TOKEN  free token from data.transportation.gov; avoids throttling on big pulls
-Your FMCSA QCMobile webKey is NOT needed for bulk data. Keep it for live single-carrier lookups on a server.
+Optional env var: SOCRATA_APP_TOKEN (free, from data.transportation.gov) avoids throttling.
 """
 import argparse, csv, gzip, io, json, os, re, sys, time, datetime as dt
 import requests
@@ -29,16 +26,18 @@ GEO = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
 HEADERS = {"X-App-Token": os.getenv("SOCRATA_APP_TOKEN", "")} if os.getenv("SOCRATA_APP_TOKEN") else {}
 STATES = ("AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY "
           "NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY").split()
-# output column -> possible census field names (Socrata field names are lowercase)
+# output column -> census field
 ALIASES = {
-    "DOT_NUMBER": ["dot_number", "usdot_number"], "LEGAL_NAME": ["legal_name"], "DBA_NAME": ["dba_name"],
-    "PHY_STREET": ["phy_street", "phy_street1"], "PHY_CITY": ["phy_city"], "PHY_STATE": ["phy_state"],
-    "PHY_ZIP": ["phy_zip"], "TELEPHONE": ["telephone", "phone"], "EMAIL_ADDRESS": ["email_address"],
-    "STATUS_CODE": ["status_code"], "NBR_POWER_UNIT": ["nbr_power_unit", "power_units"],
-    "DRIVER_TOTAL": ["driver_total", "total_drivers"], "HM_FLAG": ["hm_flag", "hm_ind"], "DOCKET1": ["docket1"], "CLASSDEF": ["classdef"],
-    "OFFICER1": ["company_officer_1"], "OFFICER2": ["company_officer_2"],
-    "CARRIER_OPERATION": ["carrier_operation"], "MCS150_DATE": ["mcs150_date"],
+    "DOT_NUMBER": "dot_number", "LEGAL_NAME": "legal_name", "DBA_NAME": "dba_name",
+    "PHY_STREET": "phy_street", "PHY_CITY": "phy_city", "PHY_STATE": "phy_state", "PHY_ZIP": "phy_zip",
+    "TELEPHONE": "phone", "EMAIL_ADDRESS": "email_address", "STATUS_CODE": "status_code",
+    "NBR_POWER_UNIT": "power_units", "DRIVER_TOTAL": "total_drivers", "HM_FLAG": "hm_ind",
+    "CARRIER_OPERATION": "carrier_operation", "MCS150_DATE": "mcs150_date",
+    "DOCKET1PREFIX": "docket1prefix", "DOCKET1": "docket1", "CLASSDEF": "classdef",
+    "OFFICER1": "company_officer_1", "OFFICER2": "company_officer_2",
 }
+DIAG = {}
+MATCH = [0, 0, 0, 0, 0]   # insurance matched, authority matched, insurance pending, authority pending, insurance cancelled
 
 
 def get(url, **kw):
@@ -74,10 +73,154 @@ def pull(ds, where=None, select=None, page=50000):
         off += page
 
 
-def pick(have, names):
-    return next((n for n in names if n in have), None)
+def parse_date(s):
+    s = str(s or "").strip()
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", s) or re.match(r"(\d{4})(\d{2})(\d{2})(?!\d)", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+    else:
+        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+        if not m:
+            return None
+        mo, d, y = map(int, m.groups())
+    try:
+        return dt.date(y, mo, d)
+    except ValueError:
+        return None
 
 
+def docket_key(v):
+    """'MC-424836' / 'MC424836' / ('MC','424836') -> 'mc424836'; keeps MC and FF numbers apart."""
+    m = re.match(r"\s*([A-Za-z]{2})\W*0*(\d+)", str(v or ""))
+    return m.group(1).lower() + m.group(2) if m else ""
+
+
+def key_of(r):
+    k = str(r.get("usdot_number") or r.get("dot_number") or "").strip().lstrip("0")
+    return k or docket_key(r.get("docket_number"))
+
+
+def money(v):
+    try:
+        return f"{float(v):,.0f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+# ---------------------------------------------------------------- insurance
+def _is_bipd(r):
+    return ("91" in str(r.get("ins_form_code", "")) or str(r.get("ins_type_code", "")) == "1"
+            or "BIPD" in str(r.get("ins_type_desc", "")).upper())
+
+
+def load_insurance(active_ds, hist_ds):
+    """Status per carrier from liability (BIPD) filings.
+       Active               = a current filing exists and no future-dated cancellation of it
+       Pending cancellation = cancellation notice with an effective date still in the future
+       Cancelled            = no current filing; last policy ended (cancel date in the past)"""
+    diag, today = {"active_dataset": active_ds, "history_dataset": hist_ds}, dt.date.today()
+    stores = {}
+    for role, ds in (("active", active_ds), ("history", hist_ds)):
+        st = stores[role] = {}
+        try:
+            print(f"Insurance {role} dataset {ds} columns:", ", ".join(fields(ds)))
+            n = 0
+            for r in pull(ds):
+                n += 1
+                k = key_of(r)
+                if k:
+                    st.setdefault(k, {"b": [], "o": []})["b" if _is_bipd(r) else "o"].append(r)
+            diag[role + "_filings"] = {"rows": n, "carriers": len(st)}
+            print(f"Insurance {role}: {n} rows, {len(st)} carriers")
+        except (Exception, SystemExit) as e:
+            diag[role + "_filings"] = {"error": (str(e) or repr(e))[:300]}
+            print(f"Insurance {role} dataset {ds} failed: {e}", file=sys.stderr)
+    out = {}
+    for k in set(stores["active"]) | set(stores["history"]):
+        c, h = stores["active"].get(k, {}), stores["history"].get(k, {})
+        g = "b" if (c.get("b") or h.get("b")) else "o"
+        act, past = c.get(g, []), h.get(g, [])
+        cd = lambda x: parse_date(x.get("cancl_effective_date"))
+        if act:
+            src = max(act, key=lambda x: parse_date(x.get("effective_date")) or dt.date.min)
+            pols = {str(x.get("policy_no", "")).strip() for x in act}
+            pend = [cd(x) for x in past if cd(x) and cd(x) >= today and "CANCEL" in str(x.get("filing_status_reason", "")).upper()
+                    and str(x.get("policy_no", "")).strip() in pols]
+            status, cdate, reason = ("Pending cancellation", min(pend).isoformat(), "CANCEL") if pend else ("Active", "", "")
+        else:
+            dated = [(cd(x), x) for x in past if cd(x) and "CANCEL" in str(x.get("filing_status_reason", "")).upper()]
+            if not dated:
+                continue
+            day, src = max(dated, key=lambda t: t[0])
+            status, cdate, reason = ("Pending cancellation" if day >= today else "Cancelled"), day.isoformat(), str(src.get("filing_status_reason", ""))
+        eff = parse_date(src.get("effective_date"))
+        row = {"insurance_status": status, "cancel_effective_date": cdate,
+               "ins_insurer": src.get("insurance_company_name", ""), "ins_policy_no": src.get("policy_no", ""),
+               "ins_liability_limit": money(src.get("max_cov_amount")), "ins_underlying_limit": money(src.get("underl_lim_amount")),
+               "ins_effective_date": eff.isoformat() if eff else "", "ins_form": src.get("ins_form_code", ""),
+               "ins_cancel_reason": reason}
+        out[k] = {a: b for a, b in row.items() if b != ""}
+        out[k]["insurance_status"], out[k]["cancel_effective_date"] = status, cdate
+    vals = [v["insurance_status"] for v in out.values()]
+    diag.update(carriers=len(out), active=vals.count("Active"), pending=vals.count("Pending cancellation"), cancelled=vals.count("Cancelled"))
+    print(f"Insurance result: {len(out)} carriers; active {diag['active']}, pending cancellation {diag['pending']}, cancelled {diag['cancelled']}")
+    return out, diag
+
+
+# ---------------------------------------------------------------- authority
+def load_authority(auth_ds, order_ds):
+    """Authority status from the status-change history, plus pending suspensions from served orders."""
+    diag, today, out = {"dataset": auth_ds, "orders": order_ds}, dt.date.today(), {}
+    try:
+        print(f"Authority dataset {auth_ds} columns:", ", ".join(fields(auth_ds)))
+        rank = {"pending": 0, "active": 2}
+        latest, reinst, n = {}, {}, 0
+        for r in pull(auth_ds):
+            n += 1
+            k, day = key_of(r), parse_date(r.get("status_change_date"))
+            if not k or not day:
+                continue
+            tv = str(r.get("docket_number", "")) + "|" + str(r.get("op_auth_type", ""))
+            s = str(r.get("op_auth_status", "")).strip().lower()
+            cur = latest.setdefault(k, {})
+            if tv not in cur or (day, rank.get(s, 1)) >= cur[tv][0]:
+                cur[tv] = ((day, rank.get(s, 1)), s)
+            if "reinstat" in str(r.get("reason", "")).lower() and day >= reinst.get(k, dt.date.min):
+                reinst[k] = day
+        for k, types in latest.items():
+            sts = [s for _, s in types.values()]
+            status = "Active" if "active" in sts else "Application pending" if "pending" in sts else "Inactive"
+            out[k] = {"authority_status": status}
+            if k in reinst:
+                out[k]["reinstated_date"] = reinst[k].isoformat()
+        diag.update(rows=n, carriers=len(out))
+        print(f"Authority history: {n} rows, {len(out)} carriers")
+    except (Exception, SystemExit) as e:
+        diag["error"] = (str(e) or repr(e))[:300]
+        print(f"Authority dataset {auth_ds} failed: {e}", file=sys.stderr)
+    try:
+        pend, n = {}, 0
+        for r in pull(order_ds):
+            n += 1
+            k, day = key_of(r), parse_date(r.get("order1_effective_date"))
+            if k and day and today <= day < dt.date(2100, 1, 1) and (k not in pend or day < pend[k][0]):
+                pend[k] = (day, str(r.get("order1_type_desc", "")))
+        for k, (day, desc) in pend.items():
+            if out.get(k, {}).get("authority_status", "Active") == "Active":
+                out.setdefault(k, {}).update(authority_status="Pending cancellation", ins_authority_pending_date=day.isoformat(),
+                                             ins_authority_pending_type=desc)
+        diag["orders_rows"], diag["pending_orders"] = n, len(pend)
+        print(f"Suspension/revocation orders: {n} rows; pending (future effective date): {len(pend)}")
+    except (Exception, SystemExit) as e:
+        diag["orders_error"] = (str(e) or repr(e))[:300]
+        print(f"Orders dataset {order_ds} failed: {e}", file=sys.stderr)
+    vals = [v.get("authority_status") for v in out.values()]
+    diag.update(active=vals.count("Active"), inactive=vals.count("Inactive"), pending_cancellation=vals.count("Pending cancellation"),
+                application_pending=vals.count("Application pending"))
+    return out, diag
+
+
+# ---------------------------------------------------------------- geocoding
 def geocode(items, cache, limit=10**9):
     """items: {key: (street, city, state, zip)}; fills cache[key] = [lat, lng] or None."""
     todo = [k for k in items if k not in cache][:limit]
@@ -109,246 +252,27 @@ def geocode(items, cache, limit=10**9):
         print(f"  geocoded {min(i + 5000, len(todo))}/{len(todo)}")
 
 
-def load_li(a):
-    if not a.li:
-        return {}
-    cols = {"authority_status": a.li_auth, "insurance_status": a.li_ins, "cancel_effective_date": a.li_date}
-    use = [c for c in cols.values() if c]
-    if not a.li_dot or not use:
-        sys.exit("--li needs --li-dot and at least one of --li-auth / --li-ins / --li-date (see: columns <dataset>)")
-    have = fields(a.li)
-    for c in [a.li_dot] + use:
-        if c not in have:
-            sys.exit(f"Column {c} not in {a.li}. Available: {', '.join(have)}")
-    out = {}
-    for r in pull(a.li, select=",".join([a.li_dot] + use)):
-        d = str(r.get(a.li_dot, "")).lstrip("0")
-        if d:
-            out[d] = {k: r.get(v, "") for k, v in cols.items() if v}  # last row per DOT wins
-    print(f"Loaded {len(out)} insurance/authority records")
-    return out
-
-
-def parse_date(s):
-    s = str(s or "").strip()
-    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", s) or re.match(r"(\d{4})(\d{2})(\d{2})(?!\d)", s)
-    if m:
-        y, mo, d = map(int, m.groups())
-    else:
-        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
-        if not m:
-            return None
-        mo, d, y = map(int, m.groups())
-    try:
-        return dt.date(y, mo, d)
-    except ValueError:
-        return None
-
-
-DETAIL_RE = re.compile(r"insur|polic|effective|posted|limit|max|underl|company|form|type", re.I)
-DIAG = {}
-MATCH = [0, 0, 0, 0, 0]
-
-
-def _key(r, dot, dock):
-    k = str(r.get(dot, "")).strip().lstrip("0") if dot else ""
-    if not k and dock:
-        dd = re.sub(r"\D", "", str(r.get(dock, ""))).lstrip("0")
-        k = "mc" + dd if dd else ""
-    return k
-
-
-def _cols(have):
-    dot = next((c for c in ("dot_number", "usdot_number", "usdot", "dot", "dot_no") if c in have), None) \
-        or next((c for c in have if "dot" in c), None)
-    return dot, next((c for c in have if "docket" in c), None)
-
-
-def _first(cands, fn):
-    diag = {"tried": []}
-    for ds in cands:
-        ds = ds.strip()
-        if not ds:
-            continue
-        try:
-            out, d = fn(ds)
-        except (Exception, SystemExit) as e:
-            diag["tried"].append({"dataset": ds, "error": (str(e) or repr(e))[:300]})
-            print("Dataset", ds, "failed:", e, file=sys.stderr)
-            continue
-        diag["tried"].append({k: v for k, v in d.items() if k != "sample"})
-        diag.setdefault("details", {})[ds] = d
-        if out:
-            diag["used"] = ds
-            return out, diag
-    return {}, diag
-
-
-def _load_authority(ds):
-    """Authority status history (Motus AuthHist). Latest status per authority type; last 'reinstated' date."""
-    have = fields(ds)
-    dot, dock = _cols(have)
-    typ = next((c for c in have if "auth_type" in c or c.endswith("_type")), None)
-    st = next((c for c in have if "auth_status" in c), None) or next((c for c in have if "status" in c and "date" not in c), None)
-    rs = next((c for c in have if c == "reason" or "reason" in c), None)
-    dc = next((c for c in have if "status_change_date" in c), None) or next((c for c in have if "date" in c), None)
-    d = {"dataset": ds, "columns": have, "dot": dot, "docket": dock, "type": typ, "status": st, "reason": rs, "date": dc}
-    print(f"Authority dataset {ds}: columns {', '.join(have)}")
-    if not st or not dc or not (dot or dock):
-        d["error"] = "could not find status, date and DOT/docket columns"
-        return {}, d
-    d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
-    print("Authority sample rows:", json.dumps(d["sample"])[:700])
-    sel = ",".join(dict.fromkeys(x for x in (dot, dock, typ, st, rs, dc) if x))
-    latest, reinst, seen, nkey, nday = {}, {}, 0, 0, 0
-    for r in pull(ds, select=sel):
-        seen += 1
-        k = _key(r, dot, dock)
-        day = parse_date(r.get(dc))
-        nkey += 1 if k else 0
-        nday += 1 if day else 0
-        if not k or not day:
-            continue
-        sv = str(r.get(st, "")).lower()
-        tv = str(r.get(typ, "")) if typ else ""
-        cur = latest.setdefault(k, {})
-        if tv not in cur or day >= cur[tv][0]:
-            cur[tv] = (day, sv)
-        if rs and "reinstat" in str(r.get(rs, "")).lower() and day >= reinst.get(k, dt.date.min):
-            reinst[k] = day
-    if not latest:
-        d.update(rows=seen, error=f"read {seen} rows; {nkey} had a DOT/docket number, {nday} had a readable date in '{dc}'")
-        return {}, d
-    out = {}
-    for k, types in latest.items():
-        act = any("active" in s and "inactive" not in s for _, s in types.values())
-        out[k] = {"authority_status": "Active" if act else "Inactive", "reinstated_date": reinst[k].isoformat() if k in reinst else ""}
-    d.update(rows=seen, carriers=len(out), active=sum(v["authority_status"] == "Active" for v in out.values()),
-             reinstated=len(reinst))
-    print(f"Authority rows: {seen}; carriers: {len(out)}; active: {d['active']}; with reinstated date: {len(reinst)}")
-    return out, d
-
-
-def _load_pending_auth(ds):
-    """Suspension/revocation orders already served but not yet effective = authority pending cancellation."""
-    have = fields(ds)
-    dot, dock = _cols(have)
-    ec = next((c for c in have if "effective" in c and "date" in c), None) or next((c for c in have if "effective" in c), None)
-    d = {"dataset": ds, "columns": have, "dot": dot, "docket": dock, "effective": ec}
-    print(f"Revoke/suspend dataset {ds}: columns {', '.join(have)}")
-    if not ec or not (dot or dock):
-        d["error"] = "could not find effective-date and DOT/docket columns"
-        return {}, d
-    d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
-    today, out, seen = dt.date.today(), {}, 0
-    for r in pull(ds, select=",".join(dict.fromkeys(x for x in (dot, dock, ec) if x))):
-        seen += 1
-        k, day = _key(r, dot, dock), parse_date(r.get(ec))
-        if k and day and today <= day < dt.date(2100, 1, 1):
-            o = out.setdefault(k, {"authority_status": "Pending cancellation", "ins_authority_pending_date": day.isoformat()})
-            o["ins_authority_pending_date"] = min(o["ins_authority_pending_date"], day.isoformat())
-    d.update(rows=seen, carriers=len(out))
-    print(f"Revoke/suspend rows: {seen}; pending (future effective date): {len(out)}")
-    return out, d
-
-
-def load_authority(cands, pend_cands):
-    out, diag = _first(cands, _load_authority)
-    pend, pdiag = _first(pend_cands, _load_pending_auth)
-    for k, v in pend.items():
-        out.setdefault(k, {}).update(v)
-    diag["pending_source"] = pdiag
-    return out, diag
-
-
-def _load_ins(ds):
-    have = fields(ds)
-    d = {"dataset": ds, "columns": have}
-    dot = next((c for c in ("dot_number", "usdot_number", "usdot", "dot", "dot_no") if c in have), None) \
-        or next((c for c in have if "dot" in c), None)
-    dock = next((c for c in have if "docket" in c), None)
-    canc = next((c for c in ("cancl_effective_date", "cancel_effective_date", "cancellation_date") if c in have), None) \
-        or next((c for c in have if ("cancl" in c or "cancel" in c) and "date" in c), None)
-    detail = [c for c in have if c not in (dot, dock, canc) and DETAIL_RE.search(c)][:8]
-    d.update(dot=dot, docket=dock, cancel=canc, detail=detail)
-    print(f"Insurance dataset {ds}: columns {', '.join(have)}")
-    if not canc or not (dot or dock):
-        d["error"] = "could not find a DOT/docket column and a cancel-date column"
-        print("WARNING:", d["error"], file=sys.stderr)
-        return {}, d
-    d["sample"] = get(f"{BASE}/resource/{ds}.json", params={"$limit": 3}).json()
-    print("Insurance sample rows:", json.dumps(d["sample"])[:900])
-    today, rec, seen, parsed = dt.date.today(), {}, 0, 0
-    eff = next((c for c in detail if "effective" in c), None)
-    fc = next((c for c in detail if "form" in c), None)
-    sel = ",".join(dict.fromkeys(x for x in [dot, dock, canc] + detail if x))
-    for r in pull(ds, select=sel):
-        seen += 1
-        k = _key(r, dot, dock)
-        if not k:
-            continue
-        grp = "b" if fc and "91" in str(r.get(fc, "")) else "o"   # BMC-91 / 91X = liability (BIPD) filings
-        s = rec.setdefault((k, grp), {"open": False, "future": None, "past": None, "eff": dt.date.min, "det": {}})
-        c = parse_date(r.get(canc))
-        if c and c >= dt.date(2100, 1, 1):
-            c = None
-        if c:
-            parsed += 1
-            if c >= today:
-                s["future"] = c if s["future"] is None else min(s["future"], c)
-            else:
-                s["past"] = c if s["past"] is None else max(s["past"], c)
-        else:
-            s["open"] = True
-        e = parse_date(r.get(eff)) if eff else None
-        if e is None or e >= s["eff"]:
-            s["eff"] = e or s["eff"]
-            s["det"] = {"ins_" + x: str(r.get(x, "") or "").strip() for x in detail if str(r.get(x, "") or "").strip()}
-    pick = {}
-    for (k, g), s in rec.items():
-        if g == "b" or k not in pick:
-            pick[k] = s
-    out = {}
-    for k, s in pick.items():
-        if s["open"]:
-            st, cd = "Active", ""
-        elif s["future"]:
-            st, cd = "Pending cancellation", s["future"].isoformat()
-        else:
-            st, cd = "Cancelled", s["past"].isoformat() if s["past"] else ""
-        out[k] = {"insurance_status": st, "cancel_effective_date": cd, **s["det"]}
-    d.update(rows=seen, with_cancel_date=parsed, carriers=len(out),
-             pending=sum(v["insurance_status"] == "Pending cancellation" for v in out.values()),
-             cancelled=sum(v["insurance_status"] == "Cancelled" for v in out.values()))
-    print(f"Insurance rows read: {seen}; with a cancel date: {parsed}; carriers: {len(out)}; "
-          f"pending cancellation: {d['pending']}; cancelled: {d['cancelled']}")
-    return out, d
-
-
-def load_insurance(candidates):
-    return _first(candidates, _load_ins)
-
-
+# ---------------------------------------------------------------- main run
 def run(a):
     os.makedirs(a.out, exist_ok=True)
     have = fields(CENSUS)
-    m = {k: pick(have, v) for k, v in ALIASES.items()}
+    m = {k: (v if v in have else None) for k, v in ALIASES.items()}
     for need in ("DOT_NUMBER", "LEGAL_NAME", "PHY_STATE"):
         if not m[need]:
             sys.exit(f"Census column for {need} not found. Run: columns {CENSUS}")
-    print("Census columns used:", {k: v for k, v in m.items() if v})
-    li = load_li(a)
+    select = ",".join(f for f in m.values() if f)
+    li = {}
     if not a.no_insurance:
-        ins, dg = load_insurance(a.ins_dataset.split(","))
-        DIAG.update(dg)
-        for d, v in ins.items():
-            li.setdefault(d, {}).update(v)
+        ins, DIAG["insurance"] = load_insurance(a.ins_dataset, a.ins_hist_dataset)
+        for k, v in ins.items():
+            li.setdefault(k, {}).update(v)
     if not a.no_authority:
-        auth, DIAG["authority"] = load_authority(a.auth_dataset.split(","), a.pend_dataset.split(","))
-        for d, v in auth.items():
-            li.setdefault(d, {}).update(v)
-    cpath = a.cache
-    cache = json.load(open(cpath)) if os.path.exists(cpath) else {}
+        auth, DIAG["authority"] = load_authority(a.auth_dataset, a.pend_dataset)
+        for k, v in auth.items():
+            li.setdefault(k, {}).update(v)
+    extra = sorted({c for v in li.values() for c in v})
+    cols = [k for k in ALIASES if m[k]] + ["LATITUDE", "LONGITUDE"] + extra
+    cache = json.load(open(a.cache)) if os.path.exists(a.cache) else {}
     if a.retry_misses:
         cache = {k: v for k, v in cache.items() if v}
     summary = {}
@@ -357,31 +281,30 @@ def run(a):
         if a.status and m["STATUS_CODE"]:
             where += f" AND {m['STATUS_CODE']}='{a.status}'"
         print(f"{st}: pulling census ...")
-        rows = [{k: (r.get(f) or "").strip() for k, f in m.items() if f} for r in pull(CENSUS, where=where)]
+        rows = [{k: str(r.get(f) or "").strip() for k, f in m.items() if f} for r in pull(CENSUS, where=where, select=select)]
         if not a.no_geocode and m["PHY_STREET"]:
             items = {}
+            gs = a.geocode_status.split(",") if a.geocode_status else None
             for r in rows:
                 key = "|".join(x.lower() for x in (r.get("PHY_STREET", ""), r.get("PHY_CITY", ""), st, r.get("PHY_ZIP", "")[:5]))
                 r["_k"] = key
-                if r.get("PHY_STREET") and (not a.geocode_status or r.get("STATUS_CODE") in a.geocode_status.split(",")):
+                if r.get("PHY_STREET") and (not gs or r.get("STATUS_CODE") in gs):
                     items[key] = (r["PHY_STREET"], r.get("PHY_CITY", ""), st, r.get("PHY_ZIP", "")[:5])
             geocode(items, cache, a.max_geocode)
-            json.dump(cache, open(cpath, "w"))
-        extra = sorted({k for v in li.values() for k in v})
-        cols = [k for k in ALIASES if m[k]] + ["LATITUDE", "LONGITUDE"] + extra
+            json.dump(cache, open(a.cache, "w"))
         for r in rows:
             g = cache.get(r.get("_k", "")) or ["", ""]
             r["LATITUDE"], r["LONGITUDE"] = g
-            mc = re.sub(r"\D", "", r.get("DOCKET1", "")).lstrip("0")
             v = {}
-            v.update(li.get("mc" + mc, {}) if mc else {})
+            mc = docket_key(r.get("DOCKET1PREFIX", "") + r.get("DOCKET1", "")) if r.get("DOCKET1") else ""
+            v.update(li.get(mc, {}) if mc else {})
             v.update(li.get(r["DOT_NUMBER"].lstrip("0"), {}))
             r.update(v)
-            MATCH[0] += 1 if "insurance_status" in r else 0
-            MATCH[1] += 1 if "authority_status" in r else 0
-            MATCH[2] += 1 if r.get("insurance_status") == "Pending cancellation" else 0
-            MATCH[3] += 1 if r.get("authority_status") == "Pending cancellation" else 0
-            MATCH[4] += 1 if r.get("insurance_status") == "Cancelled" else 0
+            MATCH[0] += "insurance_status" in r
+            MATCH[1] += "authority_status" in r
+            MATCH[2] += r.get("insurance_status") == "Pending cancellation"
+            MATCH[3] += r.get("authority_status") == "Pending cancellation"
+            MATCH[4] += r.get("insurance_status") == "Cancelled"
         act = [r for r in rows if r.get("STATUS_CODE", "A") == "A"]
         oth = [r for r in rows if r.get("STATUS_CODE", "A") != "A"]
         for name, part in ((st, act), (st + "-other", oth)):
@@ -401,19 +324,21 @@ def run(a):
     idx = os.path.join(a.out, "index.json")
     old = json.load(open(idx)).get("states", {}) if os.path.exists(idx) else {}
     old.update(summary)
-    used = DIAG.get("used")
-    d = DIAG.get("details", {}).get(used, {}) if used else {}
-    summ = {"used": used, "carriers": d.get("carriers"), "pending": MATCH[2], "cancelled": MATCH[4], "pending_nationwide": d.get("pending"), "matched": MATCH[0], "authority": {"used": DIAG.get("authority", {}).get("used"), "matched": MATCH[1], "pending": MATCH[3], "error": None if DIAG.get("authority", {}).get("used") else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("authority", {}).get("tried", [])), "pending_source": DIAG.get("authority", {}).get("pending_source", {}).get("used")},
-            "skipped": "; ".join(f"{x.get('dataset')}: {x.get('error')}" for x in DIAG.get("tried", []) if x.get("error") and x.get("dataset") != used), "error": None if used else "; ".join(f"{x.get('dataset')}: {x.get('error', 'no rows')}" for x in DIAG.get("tried", []))}
+    di, da = DIAG.get("insurance", {}), DIAG.get("authority", {})
+    ins_err = "; ".join(f"{r}: {di[r + '_filings']['error']}" for r in ("active", "history") if "error" in di.get(r + "_filings", {})) if di else "not run"
+    summ = {"used": None if (not di or di.get("carriers") is None or not di.get("carriers")) else f"{di['active_dataset']} + {di['history_dataset']}",
+            "carriers": di.get("carriers"), "pending": MATCH[2], "cancelled": MATCH[4], "matched": MATCH[0], "skipped": ins_err or None,
+            "error": ins_err or ("" if MATCH[0] else "no insurance rows matched"),
+            "authority": {"used": a.auth_dataset if da.get("carriers") else None, "matched": MATCH[1], "pending": MATCH[3],
+                          "error": da.get("error") or ("" if da.get("carriers") else "no authority rows read")}}
     json.dump({"updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "states": old, "insurance": summ}, open(idx, "w"))
     json.dump(DIAG, open(os.path.join(a.out, "diagnostics.json"), "w"), indent=1)
 
 
-PROBE_DEFAULT = ("az4n-8mr2,c5y8-a4uz,x96h-evps,3uet-3z4i,yu5v-wbh6,dm5j-zc6c,wb4f-neki,inys-ebih,qh9u-swkp")
+PROBE_DEFAULT = "az4n-8mr2,c5y8-a4uz,x96h-evps,3uet-3z4i,yu5v-wbh6,dm5j-zc6c,wb4f-neki,inys-ebih,qh9u-swkp"
 
 
 def probe(a):
-    """Print columns, row count and sample rows for each dataset (to the log and the run summary page)."""
     lines = ["# FMCSA dataset probe", ""]
     for ds in a.datasets.split(","):
         ds = ds.strip()
@@ -446,22 +371,21 @@ def main():
     pr.add_argument("--datasets", default=PROBE_DEFAULT)
     c = s.add_parser("columns", help="list a dataset's column names")
     c.add_argument("dataset")
-    r = s.add_parser("run", help="pull, geocode and write state files")
+    r = s.add_parser("run", help="pull, join, geocode and write state files")
     r.add_argument("--out", default="data")
     r.add_argument("--states", help="comma list, e.g. UT,FL (default: all)")
     r.add_argument("--status", default="", help="only keep this census status code (default: all statuses)")
-    r.add_argument("--geocode-status", default="A", help="comma list of status codes to geocode (default A = active; '' = all)")
+    r.add_argument("--geocode-status", default="A", help="comma list of status codes to geocode (default A; '' = all)")
     r.add_argument("--max-geocode", type=int, default=150000, help="max new addresses to geocode per run")
     r.add_argument("--cache", default="geocache.json")
-    r.add_argument("--ins-dataset", default="c5y8-a4uz,qh9u-swkp", help="comma list of insurance dataset ids; first that works is used. qh9u-swkp is the old L&I file, frozen at May 14 2026; it is only a fallback and the page warns when it is used")
-    r.add_argument("--auth-dataset", default="yu5v-wbh6", help="authority history dataset (Motus AuthHist)")
-    r.add_argument("--pend-dataset", default="wb4f-neki", help="revoke/suspend orders dataset (Motus RevokeSuspend)")
-    r.add_argument("--no-authority", action="store_true")
-    r.add_argument("--no-insurance", action="store_true")
     r.add_argument("--no-geocode", action="store_true")
-    r.add_argument("--retry-misses", action="store_true", help="retry addresses the geocoder could not match")
-    r.add_argument("--li", help="Licensing & Insurance dataset id to join by DOT number")
-    r.add_argument("--li-dot"), r.add_argument("--li-auth"), r.add_argument("--li-ins"), r.add_argument("--li-date")
+    r.add_argument("--retry-misses", action="store_true")
+    r.add_argument("--ins-dataset", default="c5y8-a4uz", help="Motus Insur (current filings)")
+    r.add_argument("--ins-hist-dataset", default="3uet-3z4i", help="Motus InsHist (cancelled / replaced policies)")
+    r.add_argument("--auth-dataset", default="yu5v-wbh6", help="Motus AuthHist")
+    r.add_argument("--pend-dataset", default="wb4f-neki", help="Motus RevokeSuspend")
+    r.add_argument("--no-insurance", action="store_true")
+    r.add_argument("--no-authority", action="store_true")
     a = p.parse_args()
     if a.cmd == "probe":
         probe(a)
