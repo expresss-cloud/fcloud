@@ -1,0 +1,24 @@
+name: Deploy site only (keeps current data)
+on:
+  workflow_dispatch:
+concurrency:
+  group: fmcsa-nightly
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install requests
+      - name: Copy the current data from the live site
+        run: python scripts/fetch_live_data.py
+        env:
+          SITE_URL: https://dynamic-mousse-058c2d.netlify.app
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      - run: npx --yes netlify-cli deploy --prod --dir=. --functions=netlify/functions --no-build
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
