@@ -4,6 +4,8 @@
 const { webcrypto } = require("crypto");
 const subtle = webcrypto.subtle, enc = new TextEncoder();
 const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const EVENTS = [];
+const note = m => { EVENTS.push(new Date().toISOString().slice(11, 19) + "Z " + m); if (EVENTS.length > 20) EVENTS.shift(); console.log("tg: " + m); };
 const WSEC = () => String(process.env.TG_WEBHOOK_SECRET || "").trim();
 
 function b32(bytes) { let bits = 0, v = 0, o = ""; for (const b of bytes) { v = ((v << 8) | b) & 0xfffff; bits += 8; while (bits >= 5) { o += A[(v >>> (bits - 5)) & 31]; bits -= 5; } } if (bits > 0) o += A[(v << (5 - bits)) & 31]; return o; }
@@ -25,19 +27,20 @@ async function tgSend(chat, html) {
     body: JSON.stringify({ chat_id: chat, text: html, parse_mode: "HTML", disable_web_page_preview: true }),
   });
   const j = await r.json().catch(() => ({}));
-  if (j.ok) console.log("tg: reply sent to chat " + chat);
-  else console.error("tg: Telegram refused the reply: " + (j.description || r.status));
+  if (j.ok) note("reply sent to chat " + chat);
+  else note("Telegram refused the reply: " + (j.description || r.status));
   return j;
 }
 
 // Open  /.netlify/functions/tg?check=1  in a browser to see what is configured (shows yes/no only, never the values).
 async function selfCheck() {
   const e = process.env, out = {
-    version: "tg-5 (self-check + setup + logging)",
+    version: "tg-6 (shows recent events)",
     TG_BOT_TOKEN_set: !!e.TG_BOT_TOKEN, TG_WEBHOOK_SECRET_set: !!WSEC(), TG_WEBHOOK_SECRET_chars_ok: /^[A-Za-z0-9_-]{1,256}$/.test(WSEC()),
     SESSION_SECRET_ok: !!e.SESSION_SECRET && e.SESSION_SECRET.length >= 16,
     allowed_ids_count: (e.TG_ALLOWED_IDS || "").split(",").map(x => x.trim()).filter(Boolean).length,
   };
+  out.recent_events = EVENTS.length ? EVENTS : ["(none yet - this check page only sees messages handled since the last deploy or restart)"];
   if (e.TG_BOT_TOKEN) {
     try {
       const me = await (await fetch(`https://api.telegram.org/bot${e.TG_BOT_TOKEN}/getMe`)).json();
@@ -70,13 +73,13 @@ exports.handler = async (ev) => {
     if (ev.httpMethod === "GET" && q.setup === "1") return await setup(ev);
     if (ev.httpMethod !== "POST") return { statusCode: 405, body: "" };
     const h = ev.headers || {};
-    console.log("tg: request received");
-    if (!WSEC()) { console.error("tg: 401 because TG_WEBHOOK_SECRET is not set in Netlify (or the site was not redeployed after adding it)"); return { statusCode: 401, body: "" }; }
-    if (!same(h["x-telegram-bot-api-secret-token"], WSEC())) { console.error("tg: 401 because the secret_token Telegram sent does not match TG_WEBHOOK_SECRET (sent length " + String(h["x-telegram-bot-api-secret-token"] || "").length + ", expected length " + WSEC().length + ")"); return { statusCode: 401, body: "" }; }
+    note("request received");
+    if (!WSEC()) { note("401 because TG_WEBHOOK_SECRET is not set in Netlify (or the site was not redeployed after adding it)"); return { statusCode: 401, body: "" }; }
+    if (!same(h["x-telegram-bot-api-secret-token"], WSEC())) { note("401 because the secret_token Telegram sent does not match TG_WEBHOOK_SECRET (sent length " + String(h["x-telegram-bot-api-secret-token"] || "").length + ", expected length " + WSEC().length + ")"); return { statusCode: 401, body: "" }; }
     const secret = process.env.SESSION_SECRET;
-    if (!secret || secret.length < 16 || !process.env.TG_BOT_TOKEN) { console.error("tg: SESSION_SECRET (16+ chars) and TG_BOT_TOKEN must be set"); return ok; }
+    if (!secret || secret.length < 16 || !process.env.TG_BOT_TOKEN) { note("SESSION_SECRET (16+ chars) and TG_BOT_TOKEN must be set"); return ok; }
     const upd = JSON.parse(ev.body || "{}"), m = upd.message;
-    console.log("tg: update keys=" + Object.keys(upd).join(",") + (m && m.from ? " from=" + m.from.id + " chat_type=" + (m.chat && m.chat.type) : ""));
+    note("update keys=" + Object.keys(upd).join(",") + (m && m.from ? " from=" + m.from.id + " chat_type=" + (m.chat && m.chat.type) : ""));
     if (!m || !m.from || !m.chat || m.chat.type !== "private") return ok;
     const allowed = (process.env.TG_ALLOWED_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
     if (!allowed.includes(String(m.from.id))) {
@@ -87,5 +90,5 @@ exports.handler = async (ev) => {
     const key = await makeKey(secret, mins);
     await tgSend(m.chat.id, `Your access key:\n\n<code>${key}</code>\n\nEnter it on the website within ${mins} minutes. Message me again for a new key any time.`);
     return ok;
-  } catch (e) { console.error("tg error", e); return ok; }
+  } catch (e) { note("error: " + (e && e.message)); return ok; }
 };
