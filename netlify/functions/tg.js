@@ -25,9 +25,29 @@ async function tgSend(chat, html) {
   });
 }
 
+// Open  /.netlify/functions/tg?check=1  in a browser to see what is configured (shows yes/no only, never the values).
+async function selfCheck() {
+  const e = process.env, out = {
+    version: "tg-3 (with self-check)",
+    TG_BOT_TOKEN_set: !!e.TG_BOT_TOKEN, TG_WEBHOOK_SECRET_set: !!e.TG_WEBHOOK_SECRET,
+    SESSION_SECRET_ok: !!e.SESSION_SECRET && e.SESSION_SECRET.length >= 16,
+    allowed_ids_count: (e.TG_ALLOWED_IDS || "").split(",").map(x => x.trim()).filter(Boolean).length,
+  };
+  if (e.TG_BOT_TOKEN) {
+    try {
+      const me = await (await fetch(`https://api.telegram.org/bot${e.TG_BOT_TOKEN}/getMe`)).json();
+      out.bot = me.ok ? "@" + me.result.username : "token rejected by Telegram: " + me.description;
+      const wi = await (await fetch(`https://api.telegram.org/bot${e.TG_BOT_TOKEN}/getWebhookInfo`)).json();
+      if (wi.ok) out.webhook = { url_set: !!wi.result.url, url_ends_with_tg: /\/\.netlify\/functions\/tg$/.test(wi.result.url || ""), pending: wi.result.pending_update_count, last_error: wi.result.last_error_message || "none" };
+    } catch (x) { out.telegram_check_failed = String(x.message || x); }
+  }
+  return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(out, null, 2) };
+}
+
 exports.handler = async (ev) => {
   const ok = { statusCode: 200, body: "ok" };   // always answer 200 so Telegram does not keep retrying
   try {
+    if (ev.httpMethod === "GET" && (ev.queryStringParameters || {}).check === "1") return await selfCheck();
     if (ev.httpMethod !== "POST") return { statusCode: 405, body: "" };
     const h = ev.headers || {};
     console.log("tg: request received");
