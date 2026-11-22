@@ -20,16 +20,20 @@ async function makeKey(secret, minutes) {
 }
 
 async function tgSend(chat, html) {
-  await fetch(`https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendMessage`, {
+  const r = await fetch(`https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendMessage`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chat, text: html, parse_mode: "HTML", disable_web_page_preview: true }),
   });
+  const j = await r.json().catch(() => ({}));
+  if (j.ok) console.log("tg: reply sent to chat " + chat);
+  else console.error("tg: Telegram refused the reply: " + (j.description || r.status));
+  return j;
 }
 
 // Open  /.netlify/functions/tg?check=1  in a browser to see what is configured (shows yes/no only, never the values).
 async function selfCheck() {
   const e = process.env, out = {
-    version: "tg-4 (self-check + setup)",
+    version: "tg-5 (self-check + setup + logging)",
     TG_BOT_TOKEN_set: !!e.TG_BOT_TOKEN, TG_WEBHOOK_SECRET_set: !!WSEC(), TG_WEBHOOK_SECRET_chars_ok: /^[A-Za-z0-9_-]{1,256}$/.test(WSEC()),
     SESSION_SECRET_ok: !!e.SESSION_SECRET && e.SESSION_SECRET.length >= 16,
     allowed_ids_count: (e.TG_ALLOWED_IDS || "").split(",").map(x => x.trim()).filter(Boolean).length,
@@ -71,7 +75,8 @@ exports.handler = async (ev) => {
     if (!same(h["x-telegram-bot-api-secret-token"], WSEC())) { console.error("tg: 401 because the secret_token Telegram sent does not match TG_WEBHOOK_SECRET (sent length " + String(h["x-telegram-bot-api-secret-token"] || "").length + ", expected length " + WSEC().length + ")"); return { statusCode: 401, body: "" }; }
     const secret = process.env.SESSION_SECRET;
     if (!secret || secret.length < 16 || !process.env.TG_BOT_TOKEN) { console.error("tg: SESSION_SECRET (16+ chars) and TG_BOT_TOKEN must be set"); return ok; }
-    const m = (JSON.parse(ev.body || "{}")).message;
+    const upd = JSON.parse(ev.body || "{}"), m = upd.message;
+    console.log("tg: update keys=" + Object.keys(upd).join(",") + (m && m.from ? " from=" + m.from.id + " chat_type=" + (m.chat && m.chat.type) : ""));
     if (!m || !m.from || !m.chat || m.chat.type !== "private") return ok;
     const allowed = (process.env.TG_ALLOWED_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
     if (!allowed.includes(String(m.from.id))) {
