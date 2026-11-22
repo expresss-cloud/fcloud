@@ -33,20 +33,26 @@ async function tgSend(chat, html) {
 }
 
 // Open  /.netlify/functions/tg?check=1  in a browser to see what is configured (shows yes/no only, never the values).
-async function selfCheck() {
+async function selfCheck(ev) {
   const e = process.env, out = {
-    version: "tg-6 (shows recent events)",
+    version: "tg-7 (probe + query secret)",
     TG_BOT_TOKEN_set: !!e.TG_BOT_TOKEN, TG_WEBHOOK_SECRET_set: !!WSEC(), TG_WEBHOOK_SECRET_chars_ok: /^[A-Za-z0-9_-]{1,256}$/.test(WSEC()),
     SESSION_SECRET_ok: !!e.SESSION_SECRET && e.SESSION_SECRET.length >= 16,
     allowed_ids_count: (e.TG_ALLOWED_IDS || "").split(",").map(x => x.trim()).filter(Boolean).length,
   };
   out.recent_events = EVENTS.length ? EVENTS : ["(none yet - this check page only sees messages handled since the last deploy or restart)"];
+  try {   // simulate Telegram: POST through the public address with the stored secret
+    const host = (ev.headers || {})["x-forwarded-host"] || (ev.headers || {}).host;
+    const pr = await fetch(`https://${host}/.netlify/functions/tg`, { method: "POST", headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": WSEC() }, body: "{}" });
+    const pt = await pr.text();
+    out.probe = { status: pr.status, answered_by: pr.status === 200 ? "bot function (secret accepted)" : /Login required|access key/.test(pt) ? "THE GATE (blocking the bot)" : pr.status === 401 ? "bot function (secret rejected)" : "unknown", body: pt.slice(0, 80) };
+  } catch (x) { out.probe = { error: String(x.message || x) }; }
   if (e.TG_BOT_TOKEN) {
     try {
       const me = await (await fetch(`https://api.telegram.org/bot${e.TG_BOT_TOKEN}/getMe`)).json();
       out.bot = me.ok ? "@" + me.result.username : "token rejected by Telegram: " + me.description;
       const wi = await (await fetch(`https://api.telegram.org/bot${e.TG_BOT_TOKEN}/getWebhookInfo`)).json();
-      if (wi.ok) out.webhook = { url_set: !!wi.result.url, url_ends_with_tg: /\/\.netlify\/functions\/tg$/.test(wi.result.url || ""), pending: wi.result.pending_update_count, last_error: wi.result.last_error_message || "none" };
+      if (wi.ok) out.webhook = { url_set: !!wi.result.url, url_ends_with_tg: /\/\.netlify\/functions\/tg(\?.*)?$/.test(wi.result.url || ""), url_has_s_param: /[?&]s=/.test(wi.result.url || ""), pending: wi.result.pending_update_count, last_error: wi.result.last_error_message || "none" };
     } catch (x) { out.telegram_check_failed = String(x.message || x); }
   }
   return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(out, null, 2) };
@@ -60,22 +66,23 @@ async function setup(ev) {
   const reply = o => ({ statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(o, null, 2) });
   if (!t || !sec || !host) return reply({ ok: false, problem: "TG_BOT_TOKEN or TG_WEBHOOK_SECRET is missing in Netlify." });
   if (!/^[A-Za-z0-9_-]{1,256}$/.test(sec)) return reply({ ok: false, problem: "TG_WEBHOOK_SECRET may only contain letters, numbers, _ and -. Change it in Netlify (no spaces or symbols), redeploy, and open this page again." });
-  const url = `https://${host}/.netlify/functions/tg`;
+  const url = `https://${host}/.netlify/functions/tg?s=${sec}`;
   const r = await (await fetch(`https://api.telegram.org/bot${t}/setWebhook`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, secret_token: sec, drop_pending_updates: true, allowed_updates: ["message"] }) })).json();
-  return reply({ ok: !!r.ok, telegram_said: r.description || r, webhook_url: url, secret_length: sec.length });
+  return reply({ ok: !!r.ok, telegram_said: r.description || r, webhook_url: url.replace(sec, "***"), secret_length: sec.length });
 }
 
 exports.handler = async (ev) => {
   const ok = { statusCode: 200, body: "ok" };   // always answer 200 so Telegram does not keep retrying
   try {
     const q = ev.queryStringParameters || {};
-    if (ev.httpMethod === "GET" && q.check === "1") return await selfCheck();
+    if (ev.httpMethod === "GET" && q.check === "1") return await selfCheck(ev);
     if (ev.httpMethod === "GET" && q.setup === "1") return await setup(ev);
     if (ev.httpMethod !== "POST") return { statusCode: 405, body: "" };
     const h = ev.headers || {};
     note("request received");
     if (!WSEC()) { note("401 because TG_WEBHOOK_SECRET is not set in Netlify (or the site was not redeployed after adding it)"); return { statusCode: 401, body: "" }; }
-    if (!same(h["x-telegram-bot-api-secret-token"], WSEC())) { note("401 because the secret_token Telegram sent does not match TG_WEBHOOK_SECRET (sent length " + String(h["x-telegram-bot-api-secret-token"] || "").length + ", expected length " + WSEC().length + ")"); return { statusCode: 401, body: "" }; }
+    const viaHeader = same(h["x-telegram-bot-api-secret-token"], WSEC()), viaQuery = same(q.s, WSEC());
+    if (!viaHeader && !viaQuery) { note("401 because the secret did not match (header sent: " + (h["x-telegram-bot-api-secret-token"] ? "yes, length " + String(h["x-telegram-bot-api-secret-token"]).length : "NO") + "; ?s= sent: " + (q.s ? "yes" : "no") + "; expected length " + WSEC().length + ")"); return { statusCode: 401, body: "" }; }
     const secret = process.env.SESSION_SECRET;
     if (!secret || secret.length < 16 || !process.env.TG_BOT_TOKEN) { note("SESSION_SECRET (16+ chars) and TG_BOT_TOKEN must be set"); return ok; }
     const upd = JSON.parse(ev.body || "{}"), m = upd.message;
