@@ -1,6 +1,6 @@
 // Runs in front of EVERY request (pages, data files, functions). No valid session cookie = no access.
 // Netlify variables: SESSION_SECRET, TG_BOT_USERNAME (optional, shown on the login page)
-export const config = { path: "/*" };
+export const config = { path: "/*", excludedPath: ["/.netlify/functions/tg", "/.netlify/functions/login"] };
 
 const enc = new TextEncoder();
 const hex = u => [...u].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -12,7 +12,7 @@ async function sessionOk(secret, cookieHeader) {
   return same(hex(new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode("sess" + m[1])))), m[2]);
 }
 
-const page = (bot, locked) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+const page = (bot, locked, via) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Carrier Map – access</title><style>
 :root{--bg:#e8ecef;--panel:#fff;--ink:#14202b;--mute:#5d6b78;--line:#cfd7de;--sign:#0b6e4f}
 @media (prefers-color-scheme:dark){:root{--bg:#0f1820;--panel:#17232d;--ink:#e6edf2;--mute:#93a2af;--line:#2a3a47;--sign:#3fbf94}}
@@ -26,17 +26,18 @@ button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:8px;backgr
 <script>document.getElementById("f").onsubmit=async function(ev){ev.preventDefault();var e=document.getElementById("e"),b=document.getElementById("b");e.textContent="";b.disabled=true;
 try{var r=await fetch("/.netlify/functions/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({key:document.getElementById("k").value})});var j=await r.json().catch(function(){return{}});
 if(r.ok){location.reload();return}e.textContent=j.error||"Could not log in."}catch(x){e.textContent="Network problem – try again."}b.disabled=false}</script>`}
-</div></body></html>`;
+${via ? `<p style="font-size:12px;margin:14px 0 0">blocked path: ${via.replace(/[^a-z0-9\/._-]/g, "")}</p>` : ""}</div></body></html>`;
 
 export default async (request, context) => {
-  const path = new URL(request.url).pathname;
-  if (path === "/.netlify/functions/login" || path === "/.netlify/functions/tg") return context.next();   // must stay reachable without a session
+  const path = new URL(request.url).pathname.replace(/\/+$/, "").toLowerCase();
+  for (const open of ["/.netlify/functions/login", "/.netlify/functions/tg"])
+    if (path === open || path.startsWith(open + "/")) return context.next();   // must stay reachable without a session
   const secret = Netlify.env.get("SESSION_SECRET");
   const locked = !secret || secret.length < 16;
   if (!locked && await sessionOk(secret, request.headers.get("cookie"))) return context.next();
   const bot = (Netlify.env.get("TG_BOT_USERNAME") || "").replace(/[^A-Za-z0-9_]/g, "");
   const h = { "cache-control": "no-store" };
   if (request.method === "GET" && (request.headers.get("accept") || "").includes("text/html"))
-    return new Response(page(bot, locked), { status: 401, headers: { ...h, "content-type": "text/html; charset=utf-8" } });
+    return new Response(page(bot, locked, path.startsWith("/.netlify/") ? path : ""), { status: 401, headers: { ...h, "content-type": "text/html; charset=utf-8" } });
   return new Response(JSON.stringify({ error: "Login required" }), { status: 401, headers: { ...h, "content-type": "application/json" } });
 };
