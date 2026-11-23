@@ -6,10 +6,9 @@
 //   GET  ?action=selftest                          -> checks that storage works (no code needed, writes nothing private)
 // Every call except selftest needs that RingCentral user's access code (header x-access-code).
 const crypto = require("crypto");
-const { getStore, connectLambda } = require("@netlify/blobs");
+const { open } = require("./lib/blobs");
 const { json, nameKey, checkCode, pick, e164 } = require("./lib/rc");
 
-const store = () => getStore({ name: "smsjobs", consistency: "strong" });
 const runToken = (id, seq) => crypto.createHmac("sha256", process.env.SESSION_SECRET || "").update("run:" + id + ":" + seq).digest("hex");
 const STALE_SEC = 240;
 
@@ -32,9 +31,8 @@ async function latest(st, account, id) {
 
 exports.handler = async (ev) => {
   try {
-    try { connectLambda(ev); } catch (e) { /* not needed outside Netlify */ }
     const H = ev.headers || {}, given = H["x-access-code"] || H["X-Access-Code"], q = ev.queryStringParameters || {};
-    const st = store();
+    const st = open(ev);
     if (ev.httpMethod === "GET" && q.action === "selftest") {
       const k = "selftest-" + Date.now();
       await st.set(k, "ok"); const v = await st.get(k, { type: "text" }); await st.delete(k);
