@@ -1,7 +1,7 @@
 // Background sender (Netlify "-background" function, may run up to 15 minutes). Sends the queued texts one by one with
 // the chosen pause, checking before EVERY text whether the job was stopped. Long jobs hand over to a fresh run.
 const crypto = require("crypto");
-const { getStore, connectLambda } = require("@netlify/blobs");
+const { open } = require("./lib/blobs");
 const { accounts, sendSms } = require("./lib/rc");
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -9,12 +9,11 @@ const RUN_MS = +process.env.SMS_RUN_MS || 12 * 60 * 1000;
 
 exports.handler = async (ev) => {
   const t0 = Date.now();
-  try { connectLambda(ev); } catch (e) {}
   const H = ev.headers || {}, b = JSON.parse(ev.body || "{}"), id = String(b.id || "").replace(/[^a-z0-9-]/gi, ""), seq = +b.seq;
   const want = crypto.createHmac("sha256", process.env.SESSION_SECRET || "").update("run:" + id + ":" + seq).digest();
   const got = Buffer.from(String(H["x-run-token"] || ""), "hex");
   if (!id || !process.env.SESSION_SECRET || got.length !== want.length || !crypto.timingSafeEqual(got, want)) return { statusCode: 401 };
-  const st = getStore({ name: "smsjobs", consistency: "strong" });
+  const st = open(ev);
   const meta0 = await st.get("meta-" + id, { type: "json" });
   if (!meta0) return { statusCode: 404 };
   const acct = accounts().find(x => x.name === meta0.account);
