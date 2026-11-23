@@ -1,6 +1,6 @@
 // Runs in front of EVERY request (pages, data files, functions). No valid session cookie = no access.
 // Netlify variables: SESSION_SECRET, TG_BOT_USERNAME (optional, shown on the login page)
-export const config = { path: "/*", excludedPath: ["/.netlify/functions/tg", "/.netlify/functions/login"] };
+export const config = { path: "/*", excludedPath: ["/.netlify/functions/tg", "/.netlify/functions/login", "/.netlify/functions/sms-run-background"] };
 
 const enc = new TextEncoder();
 const hex = u => [...u].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -30,7 +30,7 @@ ${via ? `<p style="font-size:12px;margin:14px 0 0">blocked path: ${via.replace(/
 
 export default async (request, context) => {
   const path = new URL(request.url).pathname.replace(/\/+$/, "").toLowerCase();
-  for (const open of ["/.netlify/functions/login", "/.netlify/functions/tg"])
+  for (const open of ["/.netlify/functions/login", "/.netlify/functions/tg", "/.netlify/functions/sms-run-background"])
     if (path === open || path.startsWith(open + "/")) return context.next();   // must stay reachable without a session
   const secret = Netlify.env.get("SESSION_SECRET");
   const locked = !secret || secret.length < 16;
