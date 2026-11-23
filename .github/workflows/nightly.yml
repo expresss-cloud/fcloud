@@ -3,6 +3,9 @@ on:
   schedule:
     - cron: "15 8 * * *"   # 08:15 UTC daily (3:15 am US Eastern)
   workflow_dispatch:
+concurrency:
+  group: fmcsa-nightly
+  cancel-in-progress: false   # a second run waits for the first instead of running at the same time
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,6 +23,7 @@ jobs:
       - run: python scripts/fmcsa_nightly.py run --out data
         env:
           SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+      - run: npm install --no-audit --no-fund @netlify/blobs@8.1.0
       - run: npx --yes netlify-cli deploy --prod --dir=. --functions=netlify/functions --no-build
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
