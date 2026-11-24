@@ -41,7 +41,7 @@ exports.handler = async (ev) => {
     if (ev.httpMethod !== "POST") return json(405, { error: "Method not allowed." });
     const b = JSON.parse(ev.body || "{}"), a = pick(b.account); checkCode(a, given);
     if (b.action === "savetpl") {
-      const t = { subject: String(b.subject || "").slice(0, 200), body: String(b.body || "").slice(0, 150000), html: !!b.html, templateId: String(b.templateId || "").trim().slice(0, 60) };
+      const t = { subject: String(b.subject || "").slice(0, 200), body: String(b.body || "").slice(0, 150000), html: !!b.html, templateId: String(b.templateId || "").trim().slice(0, 60), noFooter: !!b.noFooter };
       if (!t.body.trim() && !t.templateId) return json(400, { error: "Nothing to save: the message is empty." });
       await open(ev).setJSON("etpl-" + nameKey(a.name), t);
       return json(200, { saved: true });
@@ -83,7 +83,7 @@ exports.handler = async (ev) => {
       ...(!dyn && subject ? { subject: tag(subject) } : {}),
       ...(dyn ? {} : { content: [{ type: "text/plain", value: body ? text : "\u00a0" }, { type: "text/html", value: body ? html : "&nbsp;" }] }),
       categories: ["carrier-map"],
-      tracking_settings: { subscription_tracking: { enable: true,
+      tracking_settings: { subscription_tracking: b.noFooter ? { enable: false } : { enable: true,
         text: `\n\n${addr}\nTo stop receiving these emails, unsubscribe here: <% %>`,
         html: `<p style="font:12px Arial,sans-serif;color:#666;margin-top:24px">${esc(addr)}<br>Don't want these emails? <% Unsubscribe %>.</p>` } },
     } : {
@@ -92,7 +92,7 @@ exports.handler = async (ev) => {
       subject: tag(subject),
       content: [{ type: "text/plain", value: text }, { type: "text/html", value: html }],
       categories: ["carrier-map"],
-      tracking_settings: { subscription_tracking: { enable: true,
+      tracking_settings: { subscription_tracking: b.noFooter ? { enable: false } : { enable: true,
         text: `\n\n${addr}\nTo stop receiving these emails, unsubscribe here: <% %>`,
         html: `<p style="font:12px Arial,sans-serif;color:#666;margin-top:24px">${esc(addr)}<br>Don't want these emails? <% Unsubscribe %>.</p>` } },
     };
