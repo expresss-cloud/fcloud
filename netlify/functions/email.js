@@ -41,8 +41,8 @@ exports.handler = async (ev) => {
     if (ev.httpMethod !== "POST") return json(405, { error: "Method not allowed." });
     const b = JSON.parse(ev.body || "{}"), a = pick(b.account); checkCode(a, given);
     if (b.action === "savetpl") {
-      const t = { subject: String(b.subject || "").slice(0, 200), body: String(b.body || "").slice(0, 150000), html: !!b.html };
-      if (!t.body.trim()) return json(400, { error: "Nothing to save: the message is empty." });
+      const t = { subject: String(b.subject || "").slice(0, 200), body: String(b.body || "").slice(0, 150000), html: !!b.html, templateId: String(b.templateId || "").trim().slice(0, 60) };
+      if (!t.body.trim() && !t.templateId) return json(400, { error: "Nothing to save: the message is empty." });
       await open(ev).setJSON("etpl-" + nameKey(a.name), t);
       return json(200, { saved: true });
     }
@@ -51,9 +51,11 @@ exports.handler = async (ev) => {
     if (!addr) return json(500, { error: "SG_ADDRESS (your business postal address) is not set in Netlify. It is required in every email footer." });
     if (!RX.test(s.from)) return json(500, { error: `No sender address for ${a.name} (set ${a.main ? "SG_FROM" : "SG_FROM_" + nameKey(a.name)} to a sender verified in SendGrid).` });
     const subject = String(b.subject || "").replace(/[\r\n]+/g, " ").trim(), body = String(b.body || "").trim();
-    if (!subject || subject.length > 200) return json(400, { error: "Subject must be 1-200 characters." });
+    const tid = String(b.templateId || "").trim(), dyn = /^d-[0-9a-f]{32}$/i.test(tid);
+    if (tid && !dyn && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tid)) return json(400, { error: "That does not look like a SendGrid template ID (it is a long code, or starts with d- for dynamic templates)." });
+    if ((!subject && !tid) || subject.length > 200) return json(400, { error: "Subject must be 1-200 characters." });
     const isHtml = !!b.html;
-    if (!body || body.length > (isHtml ? 150000 : 10000)) return json(400, { error: isHtml ? "The HTML must be 1-150000 characters." : "Message must be 1-10000 characters." });
+    if ((!body && !tid) ||  body.length > (isHtml ? 150000 : 10000)) return json(400, { error: isHtml ? "The HTML must be 1-150000 characters." : "Message must be 1-10000 characters." });
     const seen = new Set(), recips = [];
     for (const r of Array.isArray(b.recipients) ? b.recipients : []) {
       const e = String((r && r.e) || "").trim().toLowerCase(); if (!RX.test(e) || seen.has(e)) continue; seen.add(e);
@@ -75,7 +77,16 @@ exports.handler = async (ev) => {
     const tag = t => t.replace(/\{name\}/gi, "-name-");
     const html = isHtml ? tag(body) : "<div style=\"font:15px/1.5 Arial,sans-serif\">" + esc(tag(body)).replace(/\r?\n/g, "<br>") + "</div>";
     const text = isHtml ? tag(toText(body)) : tag(body);
-    const payload = {
+    const payload = tid ? {
+      personalizations: keep.map(r => ({ to: [{ email: r.e }], ...(dyn ? { dynamic_template_data: { name: r.name || "there", dot: r.dot, ...(subject ? { subject } : {}) } } : { substitutions: { "-name-": r.name || "there", "-dot-": r.dot } }) })),
+      from: { email: s.from, ...(s.name ? { name: s.name } : {}) }, reply_to: { email: s.from }, template_id: tid,
+      ...(!dyn && subject ? { subject: tag(subject) } : {}),
+      ...(dyn ? {} : { content: [{ type: "text/plain", value: body ? text : "\u00a0" }, { type: "text/html", value: body ? html : "&nbsp;" }] }),
+      categories: ["carrier-map"],
+      tracking_settings: { subscription_tracking: { enable: true,
+        text: `\n\n${addr}\nTo stop receiving these emails, unsubscribe here: <% %>`,
+        html: `<p style="font:12px Arial,sans-serif;color:#666;margin-top:24px">${esc(addr)}<br>Don't want these emails? <% Unsubscribe %>.</p>` } },
+    } : {
       personalizations: keep.map(r => ({ to: [{ email: r.e }], substitutions: { "-name-": r.name || "there" } })),
       from: { email: s.from, ...(s.name ? { name: s.name } : {}) }, reply_to: { email: s.from },
       subject: tag(subject),
