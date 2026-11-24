@@ -7,10 +7,17 @@
 // Every call except selftest needs that RingCentral user's access code (header x-access-code).
 const crypto = require("crypto");
 const { open } = require("./lib/blobs");
-const { json, nameKey, checkCode, pick, e164 } = require("./lib/rc");
+const { json, nameKey, checkCode, pick, e164, accounts } = require("./lib/rc");
 
 const runToken = (id, seq) => crypto.createHmac("sha256", process.env.SESSION_SECRET || "").update("run:" + id + ":" + seq).digest("hex");
 const STALE_SEC = 240;
+const DAY = 86400000, RECENT_DAYS = +process.env.SMS_RECENT_DAYS || 30, CAP = +process.env.SMS_DAILY_CAP || 200;
+const dayKey = (name, t) => "day-" + nameKey(name) + "-" + new Date(t).toISOString().slice(0, 10);
+async function refund(st, meta, res) {                      // give unsent texts back to today's allowance
+  const left = meta.recips.length - ((res && res.pos) || 0); if (left <= 0 || meta.refunded) return;
+  const k = dayKey(meta.account, meta.created), used = +(await st.get(k, { type: "text" }) || 0);
+  await st.set(k, String(Math.max(0, used - left))); meta.refunded = true;
+}
 
 function view(meta, res) {
   const r = res || { pos: 0, results: [], beat: meta.created };
@@ -19,7 +26,7 @@ function view(meta, res) {
   if (stalled) status = "stalled";
   const items = meta.recips.map((x, i) => ({ name: x.name, dot: x.dot, n: x.n, s: (r.results[i] || {}).s || "", e: (r.results[i] || {}).e || "", t: (r.results[i] || {}).t || "" }));
   return { id: meta.id, account: meta.account, from: meta.from, text: meta.text, pause: meta.pause, created: meta.created, total: meta.recips.length, status,
-    sent: items.filter(x => x.s === "sent").length, failed: items.filter(x => x.s === "failed").length, error: r.err || "", items };
+    sent: items.filter(x => x.s === "sent").length, failed: items.filter(x => x.s === "failed").length, error: r.err || "", started: !!r.started, skipped: meta.skipped || null, items };
 }
 async function latest(st, account, id) {
   const jid = id || await st.get("latest-" + nameKey(account), { type: "text" });
@@ -50,10 +57,16 @@ exports.handler = async (ev) => {
     if (b.action === "stop") {
       const j = await latest(st, a.name, String(b.id || "").replace(/[^a-z0-9-]/gi, ""));
       if (!j) return json(404, { error: "No text job found." });
-      if (j.meta.status !== "stopped" && !(j.res && j.res.fin)) { j.meta.status = "stopped"; j.meta.stoppedAt = Date.now(); await st.setJSON("meta-" + j.meta.id, j.meta); }
+      if (j.meta.status !== "stopped" && !(j.res && j.res.fin)) { j.meta.status = "stopped"; j.meta.stoppedAt = Date.now(); await refund(st, j.meta, j.res); await st.setJSON("meta-" + j.meta.id, j.meta); }
       return json(200, { job: view(j.meta, j.res) });
     }
 
+    if (b.action === "dnc_add") {
+      const dnc = (await st.get("dnc", { type: "json" })) || {}; let added = 0;
+      for (const x of String(b.numbers || "").split(/[\s,;]+/)) { const n = e164(x); if (n && !dnc[n]) { dnc[n] = { d: Date.now(), by: a.name }; added++; } }
+      await st.setJSON("dnc", dnc);
+      return json(200, { added, total: Object.keys(dnc).length });
+    }
     if (b.action !== "start") return json(400, { error: "Unknown action." });
     const from = e164(b.from), text = String(b.text || "").trim(), pause = Math.min(120, Math.max(5, Math.round(+b.pause || 15)));
     if (!from) return json(400, { error: "Pick a valid sender number." });
@@ -66,11 +79,25 @@ exports.handler = async (ev) => {
     if (!recips.length) return json(400, { error: "No valid recipients." });
     if (recips.length > 200) return json(400, { error: "At most 200 recipients per batch." });
     if ((process.env.SESSION_SECRET || "").length < 16) return json(500, { error: "SESSION_SECRET is not set in Netlify." });
+    const hist = {}, now = Date.now(), skipped = { recentlyTexted: 0, failedBefore: 0, doNotText: 0 }, keep = [];
+    for (const a2 of accounts()) {                                   // history of ALL agents, so nobody is texted twice
+      const h2 = (await st.get("hist-" + nameKey(a2.name), { type: "json" })) || {};
+      for (const n of Object.keys(h2)) if (!hist[n] || h2[n].d > hist[n].d) hist[n] = h2[n];
+    }
+    const dnc = (await st.get("dnc", { type: "json" })) || {};
+    for (const r of recips) { const h = hist[r.n];
+      if (dnc[r.n]) skipped.doNotText++;
+      else if (h && now - h.d < RECENT_DAYS * DAY) { h.ok ? skipped.recentlyTexted++ : skipped.failedBefore++; } else keep.push(r); }
+    if (!keep.length) return json(400, { error: `Nobody left to text: all ${recips.length} were skipped (texted or failed in the last ${RECENT_DAYS} days by any agent, or on the do-not-text list).` });
+    recips.length = 0; recips.push(...keep);
+    const dk = dayKey(a.name, now), used = +(await st.get(dk, { type: "text" }) || 0);
+    if (used + recips.length > CAP) return json(400, { error: `Daily limit: ${a.name} can send ${CAP} texts per day and has ${Math.max(0, CAP - used)} left today (${used} used). Enter ${Math.max(0, CAP - used)} or fewer.` });
     const cur = await latest(st, a.name, "");
     if (cur) { const v = view(cur.meta, cur.res); if (v.status === "running") return json(409, { error: `${a.name} already has a text job running (${v.sent + v.failed} of ${v.total} done). Stop it first or wait until it finishes.`, job: v }); }
 
     const id = Date.now().toString(36) + crypto.randomBytes(4).toString("hex"), seq = 1;
-    const meta = { id, account: a.name, from, text, pause, recips, status: "running", seq, created: Date.now() };
+    const meta = { id, account: a.name, from, text, pause, recips, skipped, status: "running", seq, created: now };
+    await st.set(dk, String(used + recips.length));
     await st.setJSON("meta-" + id, meta);
     await st.setJSON("res-" + id, { pos: 0, results: [], beat: Date.now() });
     await st.set("latest-" + nameKey(a.name), id);
@@ -79,7 +106,7 @@ exports.handler = async (ev) => {
     try { r = await fetch(`https://${host}/.netlify/functions/sms-run-background`, { method: "POST", headers: { "content-type": "application/json", "x-run-token": runToken(id, seq) }, body: JSON.stringify({ id, seq }) }); }
     catch (e) { r = { status: 0, statusText: e.message }; }
     if (r.status !== 202 && r.status !== 200) {
-      meta.status = "stopped"; await st.setJSON("meta-" + id, meta);
+      meta.status = "stopped"; await refund(st, meta, { pos: 0 }); await st.setJSON("meta-" + id, meta);
       return json(502, { error: `Could not start the background sender (HTTP ${r.status}). Make sure the latest files are deployed (sms-run-background.js and the updated gate.js).` });
     }
     return json(200, { job: view(meta, { pos: 0, results: [], beat: Date.now() }) });
