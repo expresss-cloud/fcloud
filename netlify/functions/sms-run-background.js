@@ -3,6 +3,7 @@
 const crypto = require("crypto");
 const { open } = require("./lib/blobs");
 const { accounts, sendSms } = require("./lib/rc");
+const { twSend } = require("./lib/tw");
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const DAY = 86400000;
@@ -38,11 +39,14 @@ async function run(ev) {
     }
     const r = meta0.recips[res.pos]; let rec = { s: "sent", e: "", t: new Date().toISOString() };
     for (let a = 0; a < 3; a++) {
-      try { await sendSms(acct, meta0.from, r.n, meta0.text); break; }
+      try { await (meta0.provider === "twilio" ? twSend : sendSms)(acct, meta0.from, r.n, meta0.text); break; }
       catch (e) {
         if (e.status === 429 && a < 2) { await sleep(8000 * (a + 1)); continue; }
         rec = { s: "failed", e: String(e.message || e).slice(0, 300), t: new Date().toISOString() }; break;
       }
+    }
+    if (rec.s === "failed" && /21610|unsubscribed|opted out/i.test(rec.e)) {           // the person replied STOP: never text them again
+      try { const dnc = (await st.get("dnc", { type: "json" })) || {}; dnc[r.n] = { d: Date.now(), by: "stop-reply" }; await st.setJSON("dnc", dnc); } catch (e) {}
     }
     res.results[res.pos] = rec; res.pos++;
     hist[r.n] = { d: Date.now(), ok: rec.s === "sent" }; await st.setJSON(hk, hist);
@@ -53,7 +57,7 @@ async function run(ev) {
       const k = "day-" + String(meta0.account).toUpperCase().replace(/[^A-Z0-9]/g, "_") + "-" + new Date(meta0.created).toISOString().slice(0, 10), used = +(await st.get(k, { type: "text" }) || 0);
       await st.set(k, String(Math.max(0, used - (meta0.recips.length - res.pos)))); await save(); return { statusCode: 200 };
     }
-    if (rec.s === "failed" && /credential|login failed|not set|permission/i.test(rec.e)) { res.fin = "failed"; res.err = rec.e; await save(); return { statusCode: 200 }; }
+    if (rec.s === "failed" && /credential|login failed|not set|permission|authenticate|not one of/i.test(rec.e)) { res.fin = "failed"; res.err = rec.e; await save(); return { statusCode: 200 }; }
     await save();
     if (res.pos >= meta0.recips.length) break;
     const total = meta0.pause * 1000 * (0.7 + Math.random() * 0.6);

@@ -8,6 +8,7 @@
 const crypto = require("crypto");
 const { open } = require("./lib/blobs");
 const { json, nameKey, checkCode, pick, e164, accounts } = require("./lib/rc");
+const { twNumbers } = require("./lib/tw");
 
 const runToken = (id, seq) => crypto.createHmac("sha256", process.env.SESSION_SECRET || "").update("run:" + id + ":" + seq).digest("hex");
 const STALE_SEC = 240;
@@ -25,7 +26,7 @@ function view(meta, res) {
   const stalled = status === "running" && (Date.now() - (r.beat || meta.created)) / 1000 > Math.max(STALE_SEC, meta.pause * 4 + 60);
   if (stalled) status = "stalled";
   const items = meta.recips.map((x, i) => ({ name: x.name, dot: x.dot, n: x.n, s: (r.results[i] || {}).s || "", e: (r.results[i] || {}).e || "", t: (r.results[i] || {}).t || "" }));
-  return { id: meta.id, account: meta.account, from: meta.from, text: meta.text, pause: meta.pause, created: meta.created, total: meta.recips.length, status,
+  return { id: meta.id, account: meta.account, provider: meta.provider || "ringcentral", from: meta.from, text: meta.text, pause: meta.pause, created: meta.created, total: meta.recips.length, status,
     sent: items.filter(x => x.s === "sent").length, failed: items.filter(x => x.s === "failed").length, error: r.err || "", started: !!r.started, skipped: meta.skipped || null, items };
 }
 async function latest(st, account, id) {
@@ -69,7 +70,9 @@ exports.handler = async (ev) => {
     }
     if (b.action !== "start") return json(400, { error: "Unknown action." });
     const from = e164(b.from), text = String(b.text || "").trim(), pause = Math.min(120, Math.max(5, Math.round(+b.pause || 15)));
+    const provider = b.provider === "twilio" ? "twilio" : "ringcentral";
     if (!from) return json(400, { error: "Pick a valid sender number." });
+    if (provider === "twilio" && !twNumbers(a).includes(from)) return json(403, { error: `${from} is not one of ${a.name}'s Twilio numbers.` });
     if (!text || text.length > 1000) return json(400, { error: "Message must be 1-1000 characters." });
     const seen = new Set(), recips = [];
     for (const r of Array.isArray(b.recipients) ? b.recipients : []) {
@@ -96,7 +99,7 @@ exports.handler = async (ev) => {
     if (cur) { const v = view(cur.meta, cur.res); if (v.status === "running") return json(409, { error: `${a.name} already has a text job running (${v.sent + v.failed} of ${v.total} done). Stop it first or wait until it finishes.`, job: v }); }
 
     const id = Date.now().toString(36) + crypto.randomBytes(4).toString("hex"), seq = 1;
-    const meta = { id, account: a.name, from, text, pause, recips, skipped, status: "running", seq, created: now };
+    const meta = { id, account: a.name, provider, from, text, pause, recips, skipped, status: "running", seq, created: now };
     await st.set(dk, String(used + recips.length));
     await st.setJSON("meta-" + id, meta);
     await st.setJSON("res-" + id, { pos: 0, results: [], beat: Date.now() });

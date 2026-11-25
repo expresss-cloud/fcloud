@@ -84,7 +84,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,th:focus-visible{o
 <span><button class="pri" id="sm">Send text</button> <button class="pri" id="em">Send email</button> <button class="pri ghost" id="pf">Sort pending first</button> <button class="pri" id="xl">Export Excel</button> <button class="pri ghost" id="cv">Export CSV</button></span></div>
 <div class="scroll"><table><thead><tr id="hd"></tr><tr id="hf"></tr></thead><tbody id="tb"></tbody></table></div>
 <div class="foot"><span id="cnt"></span><span><button id="more" hidden>Show 100 more</button> <button id="clr" class="ghost">Clear all filters</button></span></div>
-<p class="note">Real data: export the FMCSA Company Census File (data.transportation.gov) for one or a few states as CSV or Excel and import it. Recognized columns include DOT_NUMBER, LEGAL_NAME, PHY_STATE, PHY_CITY, PHY_ZIP, NBR_POWER_UNIT, DRIVER_TOTAL, HM_FLAG and an inspections column (insp_total). Add LATITUDE and LONGITUDE columns for exact dots; without them dots are placed approximately inside the state by ZIP. Files stay in your browser.</p>
 </section></main>
 <div class="sms-bg" id="embg"><div class="sms" role="dialog" aria-label="Send email">
 <h3>Send email</h3>
@@ -107,6 +106,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,th:focus-visible{o
 </div></div>
 <div class="sms-bg" id="smsbg"><div class="sms" role="dialog" aria-label="Send text message">
 <h3>Send text message</h3>
+<label for="smspv">Send with</label><select id="smspv"><option value="ringcentral">RingCentral</option><option value="twilio">Twilio</option></select>
 <div id="smsar" hidden><label for="smsa">Send as (RingCentral user)</label><select id="smsa"></select></div>
 <label for="smsc" id="smscl">Access code</label><input id="smsc" type="password" autocomplete="off" placeholder="Access code set in Netlify">
 <label>Send to</label><select id="smsw"></select>
@@ -179,7 +179,7 @@ $("mn").textContent=sel?"Each dot is one carrier ("+rows.length.toLocaleString()
 
 document.querySelectorAll("#hd th").forEach(th=>{const i=sorts.findIndex(s=>s[0]==th.dataset.k);if(i<0)th.removeAttribute("aria-sort");else th.setAttribute("aria-sort",sorts[i][1]>0?"ascending":"descending")});
 const vis=rows.slice(0,shown);
-$("tb").innerHTML=vis.map(c=>{const d=open===c._i;return`<tr data-i="${c._i}"${d?' class="on"':""}>`+COLS.map(([k])=>["status","auth","ins"].includes(k)&&c[k]?`<td><span class="pill${/^(Pend|Appl)/.test(c[k])?" warn":c[k]=="Active"?"":c[k]=="None"?" none":" bad"}">${esc(c[k])}</span></td>`:`<td>${esc(c[k])}</td>`).join("")+"</tr>"+(d?`<tr class="det"><td colspan="${COLS.length}"><div class="kv">${[["Legal name",c.name],["DBA",c.dba],["DOT #",c.dot],["MC #",c.mc],["Address",c.city+", "+c.state+" "+c.zip],["Map location",c._ex?"Exact (from coordinates)":"Approximate (from ZIP)"],["Phone",c.phone],["Email",c.email],["Status",c.status],["Entity type",c.type],["Operation",c.op],["For hire / private",c.hire],["Owner / officer",c.owner],["Second officer",c.owner2],...(c.x||[]),["Power units",c.trucks],["Drivers",c.drivers],["Inspections",c.insp||""],["Authority",c.auth],["Authority notice posted",c.apend],["Authority cancels on",c.acancel],["Authority notice type",c.atype],["Authority reinstated",c.reinst],["Insurance",c.ins],["Cancellation date",c.cdate],["Hazmat",c.hazmat=="Y"?"Yes":"No"],["MCS-150 date",c.mcs]].filter(x=>x[1]!=="").map(x=>`<div><small>${x[0]}</small>${esc(x[1])}</div>`).join("")}</div>${c.phone?`<p style="margin:10px 0 0"><button class="pri txbtn" data-i="${c._i}">Text this carrier</button></p>`:""}</td></tr>`:"")}).join("")||`<tr><td colspan="${COLS.length}">No carriers match. Clear a filter or pick another state.</td></tr>`;
+$("tb").innerHTML=vis.map(c=>{const d=open===c._i;return`<tr data-i="${c._i}"${d?' class="on"':""}>`+COLS.map(([k])=>["status","auth","ins"].includes(k)&&c[k]?`<td><span class="pill${/^(Pend|Appl)/.test(c[k])?" warn":c[k]=="Active"?"":c[k]=="None"?" none":" bad"}">${esc(c[k])}</span></td>`:`<td>${esc(c[k])}</td>`).join("")+"</tr>"+(d?`<tr class="det"><td colspan="${COLS.length}"><div class="kv">${[["Legal name",c.name],["DBA",c.dba],["DOT #",c.dot],["MC #",c.mc],["Address",c.city+", "+c.state+" "+c.zip],["Map location",c._ex?"Exact (from coordinates)":"Approximate (from ZIP)"],["Phone",c.phone],["Email",c.email],["Status",c.status],["Entity type",c.type],["Operation",c.op],["For hire / private",c.hire],["Owner / officer",c.owner],["Second officer",c.owner2],...(c.x||[]),["Power units",c.trucks],["Drivers",c.drivers],["Inspections",c.insp||""],["Authority",c.auth],["Authority notice posted",c.apend],["Authority cancels on",c.acancel],["Authority notice type",c.atype],["Authority reinstated",c.reinst],["Insurance",c.ins],["Cancellation date",c.cdate],["Hazmat",c.hazmat=="Y"?"Yes":"No"],["MCS-150 date",c.mcs]].filter(x=>x[1]!=="").map(x=>`<div><small>${x[0]}</small>${esc(x[1])}</div>`).join("")}</div>${c.phone||c.email?`<p style="margin:10px 0 0">${c.phone?`<button class="pri txbtn" data-i="${c._i}">Text this carrier</button> `:""}${/^[^\s@<>]+@[^\s@<>]+\.[A-Za-z]{2,}$/.test(String(c.email||"").trim())?`<button class="pri embtn" data-i="${c._i}">Email this carrier</button>`:""}</p>`:""}</td></tr>`:"")}).join("")||`<tr><td colspan="${COLS.length}">No carriers match. Clear a filter or pick another state.</td></tr>`;
 $("cnt").textContent=`Showing ${vis.length.toLocaleString()} of ${rows.length.toLocaleString()} · ${rows.filter(c=>c.pend).length.toLocaleString()} pending cancellation in this view`;$("more").hidden=rows.length<=shown;window._rows=rows;showDots(rows)}
 const deb=(f,ms)=>{let t;return()=>{clearTimeout(t);t=setTimeout(f,ms)}},RR=()=>{shown=100;open=null;render()},RD=deb(RR,300);
 $("hd").innerHTML=COLS.map(c=>`<th tabindex="0" data-k="${c[0]}">${c[1]}</th>`).join("");
@@ -229,7 +229,7 @@ if(!LIVE){DATA=sample();$("src").textContent="Sample data – the nightly job ha
 (()=>{const E=id=>document.getElementById(id),FN="/.netlify/functions/sms";
 let busy=false,job=null,armed=null,pick=null,accts=[],tm=null;
 const ph=v=>{const d=String(v||"").replace(/\D/g,"");return d.length==10?"+1"+d:d.length==11&&d[0]=="1"?"+"+d:""};
-const code=()=>E("smsc").value.trim(),hd=()=>({"x-access-code":code()});
+const code=()=>E("smsc").value.trim(),hd=()=>({"x-access-code":code()}),prov=()=>E("smspv").value;
 const say=(t,bad)=>{const m=E("smsm");m.textContent=t;m.className="msg"+(bad?" err":"")};
 const eta=n=>{const m=Math.ceil(n*(+E("smsy").value||15)/60);return m<2?"about a minute":m<120?"about "+m+" minutes":"about "+(m/60).toFixed(1)+" hours"};
 function targets(){const w=E("smsw").value;let list=w=="one"&&pick!=null?DATA.filter(c=>c._i==pick):(window._rows||[]);const seen=new Set(),out=[];let bad=0;
@@ -243,9 +243,9 @@ async function loadAccounts(){const r=await fetch(FN+"?action=accounts",{headers
  const a=E("smsa");a.innerHTML=accts.map(n=>`<option>${n.replace(/[<>&"]/g,"")}</option>`).join("");let want="";try{want=sessionStorage.getItem("smsa")||""}catch(e){}
  if(accts.includes(want))a.value=want;else if(accts.length)a.selectedIndex=0;E("smsar").hidden=accts.length<2;E("smscl").textContent=accts.length<2?"Access code":"Access code for the user above"}
 async function loadNums(){const sel=E("smsf");if(!code())return say("Enter the access code first.",true);E("smsn").textContent="Loading…";sel.innerHTML="";
- try{if(!accts.length)await loadAccounts();const acc=E("smsa").value;const r=await fetch(FN+"?action=numbers&account="+encodeURIComponent(acc),{headers:hd()}),j=await r.json();if(!r.ok)throw new Error(j.error||r.status);
+ try{if(!accts.length)await loadAccounts();const acc=E("smsa").value;const r=await fetch(FN+"?action=numbers&provider="+prov()+"&account="+encodeURIComponent(acc),{headers:hd()}),j=await r.json();if(!r.ok)throw new Error(j.error||r.status);
   sel.innerHTML=j.numbers.map(n=>`<option value="${n.number}">${n.number}${n.label?" – "+n.label.replace(/[<>&]/g,""):""}</option>`).join("");
-  if(j.numbers.length)sel.selectedIndex=0;E("smsn").textContent=j.numbers.length?`${j.numbers.length} number${j.numbers.length==1?"":"s"} for ${j.account}`:`No SMS-enabled numbers for ${j.account}.`;
+  if(j.numbers.length)sel.selectedIndex=0;E("smsn").textContent=j.numbers.length?`${j.numbers.length} number${j.numbers.length==1?"":"s"} for ${j.account}`:prov()=="twilio"?`No Twilio numbers set for ${j.account} (add TWILIO_FROM in Netlify).`:`No SMS-enabled numbers for ${j.account}.`;
   try{sessionStorage.setItem("smsa",j.account)}catch(e){}say("");refresh()}
  catch(e){E("smsn").textContent="";say("Could not load numbers: "+e.message,true)}}
 async function switchUser(reload){armed=null;job=null;clearTimeout(tm);tm=null;view();E("smsg").textContent="Send";E("smsf").innerHTML="";E("smsn").textContent="";
@@ -268,9 +268,9 @@ async function go(){
  const from=E("smsf").value,body=E("smst").value.trim();if(!code())return say("Enter the access code.",true);if(!from)return say("Pick a From number (click Reload numbers).",true);if(!body)return say("Type a message.",true);
  const t=info(true),n=cnt();if(!t.out.length)return say("No carriers with a valid phone number to text.",true);
  if(!n)return say("Enter how many people to text (1 to 200).",true);if(n>200)return say("The limit is 200 people per batch.",true);if(n>t.out.length)return say(`Only ${t.out.length} carrier${t.out.length==1?" has":"s have"} a valid phone number in this view. Enter ${t.out.length} or fewer.`,true);
- const key=from+"|"+body+"|"+n+"|"+E("smsa").value;if(armed!==key){armed=key;E("smsg").textContent=`Confirm – send ${n} text${n==1?"":"s"} from ${from}`;return say("Check the message and the number of people, then click again to send. This cannot be undone.")}
+ const key=from+"|"+body+"|"+n+"|"+E("smsa").value+"|"+prov();if(armed!==key){armed=key;E("smsg").textContent=`Confirm – send ${n} text${n==1?"":"s"} from ${from}`;return say("Check the message and the number of people, then click again to send. This cannot be undone.")}
  armed=null;E("smsg").textContent="Send";E("smsg").disabled=true;
- try{const j=await api("POST",{action:"start",account:E("smsa").value,from,text:body,pause:+E("smsy").value||15,recipients:t.out.slice(0,n).map(x=>({n:x.n,name:x.c.name,dot:x.c.dot}))});job=j.job;view();clearTimeout(tm);tm=setTimeout(refresh,4000)}
+ try{const j=await api("POST",{action:"start",account:E("smsa").value,provider:prov(),from,text:body,pause:+E("smsy").value||15,recipients:t.out.slice(0,n).map(x=>({n:x.n,name:x.c.name,dot:x.c.dot}))});job=j.job;view();clearTimeout(tm);tm=setTimeout(refresh,4000)}
  catch(e){if(e.job){job=e.job;view();return say(e.message,true)}E("smsg").disabled=false;say("Could not start: "+e.message,true)}}
 async function addDnc(){const v=E("smsdn").value.trim(),m=E("smsdm");if(!code())return m.textContent="Enter the access code first.";if(!v)return m.textContent="Paste at least one number.";
  try{const j=await api("POST",{action:"dnc_add",account:E("smsa").value,numbers:v});E("smsdn").value="";m.textContent=`Added ${j.added}. The list now has ${j.total}.`}catch(e){m.textContent="Could not add: "+e.message}}
@@ -278,18 +278,18 @@ async function halt(){E("smss").disabled=true;try{const j=await api("POST",{acti
 function dl(){if(!job)return;const q=v=>'"'+String(v).replace(/"/g,'""')+'"';const csv=[["time","carrier","dot","to","sent as","from","result","error"],...job.items.filter(x=>x.s).map(x=>[x.t,x.name,x.dot,x.n,job.account,job.from,x.s,x.e])].map(r=>r.map(q).join(",")).join("\r\n");
  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="text-log-"+new Date().toISOString().slice(0,10)+".csv";a.click()}
 E("sm").onclick=()=>openM(null);const closeM=()=>{E("smsbg").classList.remove("on");clearTimeout(tm);tm=null;E("smsc").value="";E("smsf").innerHTML="";E("smsn").textContent="";say("")};E("smsx").onclick=closeM;E("smsl").onclick=loadNums;E("smsg").onclick=go;E("smss").onclick=halt;E("smsdb").onclick=addDnc;E("smsq").oninput=()=>info();E("smsd").onclick=dl;
-E("smsw").onchange=()=>info();E("smsy").onchange=()=>info();E("smst").oninput=()=>{armed=null;E("smsg").textContent="Send"};E("smsc").onchange=()=>{if(code())loadNums()};E("smsa").onchange=()=>switchUser(false);
+E("smspv").onchange=()=>{armed=null;E("smsg").textContent="Send";E("smsf").innerHTML="";E("smsn").textContent="";if(code())loadNums();else say("Enter the access code.")};E("smsw").onchange=()=>info();E("smsy").onchange=()=>info();E("smst").oninput=()=>{armed=null;E("smsg").textContent="Send"};E("smsc").onchange=()=>{if(code())loadNums()};E("smsa").onchange=()=>switchUser(false);
 document.addEventListener("click",e=>{const b=e.target.closest&&e.target.closest(".txbtn");if(b)openM(+b.dataset.i)});
 document.addEventListener("keydown",e=>{if(e.key=="Escape")closeM()});
 })();
 
 /* ---- Email through SendGrid (server side: netlify/functions/email.js) ---- */
-(()=>{const E=id=>document.getElementById(id),FN="/.netlify/functions/email";let armed=null,res=null,accts=[],ready=false,busy=false;
+(()=>{const E=id=>document.getElementById(id),FN="/.netlify/functions/email";let armed=null,res=null,accts=[],ready=false,busy=false,pickE=null;
 const OK=v=>/^[^\s@<>"',;]+@[^\s@<>"',;]+\.[A-Za-z]{2,}$/.test(String(v||"").trim());
 const code=()=>E("emc").value.trim(),hd=()=>({"x-access-code":code()}),say=(t,bad)=>{const m=E("emm");m.textContent=t;m.className="msg"+(bad?" err":"")};
 const cnt=()=>{const v=E("emq").value.trim();return /^\d+$/.test(v)?+v:0};
-function targets(){const seen=new Set(),out=[];let bad=0;for(const c of(window._rows||[])){const e=String(c.email||"").trim().toLowerCase();if(!OK(e)){bad++;continue}if(seen.has(e))continue;seen.add(e);out.push({c,e})}return{out,bad}}
-function opts(){const t=targets();E("emw").innerHTML=`<option>All carriers in the current view (${t.out.length.toLocaleString()} with an email address)</option>`}
+function targets(){const seen=new Set(),out=[];let bad=0;for(const c of(pickE!=null&&E("emw").value=="one"?DATA.filter(c=>c._i==pickE):(window._rows||[]))){const e=String(c.email||"").trim().toLowerCase();if(!OK(e)){bad++;continue}if(seen.has(e))continue;seen.add(e);out.push({c,e})}return{out,bad}}
+function opts(){const keep=E("emw").value,n=(window._rows||[]).filter(c=>OK(c.email)).length;E("emw").innerHTML=(pickE!=null?'<option value="one">The selected carrier</option>':"")+`<option value="view">All carriers in the current view (${n.toLocaleString()} with an email address)</option>`;E("emw").value=pickE!=null?"one":"view"}
 function info(keep){if(!keep){armed=null;E("emg").textContent="Send"}const t=targets(),n=cnt();E("emk").textContent=`${t.out.length.toLocaleString()} available with a valid email${t.bad?` (${t.bad} skipped, none or invalid)`:""}.`+(n?` Emailing ${Math.min(n,t.out.length)}. `:" ")+"An unsubscribe link and your business address are added automatically. People who unsubscribe are never emailed again. Nobody is emailed twice within 30 days.";return t}
 async function api(method,body,qs){const r=await fetch(FN+(qs||""),{method,headers:{"content-type":"application/json",...hd()},body:body?JSON.stringify(body):undefined});const j=await r.json().catch(()=>({error:"Unexpected reply from the server (HTTP "+r.status+"). Is the latest version deployed?"}));if(!r.ok)throw new Error(j.error||"HTTP "+r.status);return j}
 async function loadAccounts(){const r=await fetch("/.netlify/functions/sms?action=accounts"),j=await r.json();if(!r.ok)throw new Error(j.error||r.status);accts=j.accounts||[];
@@ -304,7 +304,7 @@ async function saveTpl(){if(!code())return E("emtm").textContent="Enter the acce
  try{await api("POST",{action:"savetpl",account:E("ema").value,subject:E("ems").value.trim(),body:E("emt").value,html:fmtHtml(),templateId:fmtTpl()?E("emti").value.trim():"",noFooter:E("emnf").checked});E("emtm").textContent="Saved. It loads automatically next time."}catch(e){E("emtm").textContent="Could not save: "+e.message}}
 function preview(){const f=E("emp");if(!f.hidden){f.hidden=true;return}const sample="Sample Carrier LLC",t=E("emt").value.replace(/\{name\}/gi,sample);
  f.srcdoc=fmtHtml()?t:"<div style=\"font:15px/1.5 Arial,sans-serif;white-space:pre-wrap\">"+t.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))+"</div>";f.hidden=false}
-async function open_(){res=null;armed=null;E("emp").hidden=true;E("emtm").textContent="";opts();info();E("embg").classList.add("on");E("emd").hidden=true;E("emg").textContent="Send";say("");E("emf").textContent="";E("emc").value="";try{await loadAccounts();say(accts.length>1?"Enter the access code for "+E("ema").value+".":"Enter the access code.")}catch(e){say("Could not load users: "+e.message,true)}}
+async function open_(one){pickE=typeof one=="number"?one:null;res=null;armed=null;E("emp").hidden=true;E("emtm").textContent="";opts();if(pickE!=null)E("emq").value="1";info();E("embg").classList.add("on");E("emd").hidden=true;E("emg").textContent="Send";say("");E("emf").textContent="";E("emc").value="";try{await loadAccounts();say(accts.length>1?"Enter the access code for "+E("ema").value+".":"Enter the access code.")}catch(e){say("Could not load users: "+e.message,true)}}
 function close_(){E("embg").classList.remove("on");E("emc").value="";E("emf").textContent=""}
 async function go(){if(busy)return;const sub=E("ems").value.trim(),body=E("emt").value.trim();if(!code())return say("Enter the access code.",true);if(!ready)await sender();if(!ready)return;
  if(fmtTpl()){if(!E("emti").value.trim())return say("Paste your SendGrid template ID.",true)}else{if(!sub)return say("Type a subject.",true);if(!body)return say("Type a message.",true)}const t=info(true),n=cnt();if(!t.out.length)return say("No carriers with a valid email address in this view.",true);
@@ -316,7 +316,7 @@ async function go(){if(busy)return;const sub=E("ems").value.trim(),body=E("emt")
  catch(e){say(e.message,true)}busy=false;E("emg").disabled=false;E("emg").textContent="Send"}
 function dl(){if(!res)return;const q=v=>'"'+String(v).replace(/"/g,'""')+'"';const csv=[["time","carrier","dot","email","sent as","from"],...res.list.map(x=>[res.time,x.name,x.dot,x.e,res.account,res.from])].map(r=>r.map(q).join(",")).join("\r\n");
  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="email-log-"+new Date().toISOString().slice(0,10)+".csv";a.click()}
-E("em").onclick=open_;E("emx").onclick=close_;E("emg").onclick=go;E("emd").onclick=dl;E("emq").oninput=()=>info();E("ems").oninput=E("emt").oninput=()=>{armed=null;E("emg").textContent="Send"};
+E("em").onclick=()=>open_();E("emw").onchange=()=>{E("emq").value=E("emw").value=="one"?"1":"";info()};document.addEventListener("click",e=>{const b=e.target.closest&&e.target.closest(".embtn");if(b)open_(+b.dataset.i)});E("emx").onclick=close_;E("emg").onclick=go;E("emd").onclick=dl;E("emq").oninput=()=>info();E("ems").oninput=E("emt").oninput=()=>{armed=null;E("emg").textContent="Send"};
 E("emc").onchange=sender;E("emfm").onchange=fmt;E("emnf").onchange=()=>{armed=null;E("emg").textContent="Send"};E("emti").oninput=()=>{armed=null;E("emg").textContent="Send"};E("emv").onclick=preview;E("emsv").onclick=saveTpl;E("ema").onchange=()=>{armed=null;ready=false;E("emc").value="";E("emf").textContent="";say("Enter the access code for "+E("ema").value+".")};
 document.addEventListener("keydown",e=>{if(e.key=="Escape"&&E("embg").classList.contains("on"))close_()});
 })();

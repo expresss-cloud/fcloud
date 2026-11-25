@@ -9,6 +9,7 @@
 //   More users: RC_ACCOUNTS=Alice,Bob  plus  RC_JWT_ALICE, RC_JWT_BOB  and their codes  RC_CODE_ALICE, RC_CODE_BOB
 //               (variable name = prefix + NAME in capitals). A user with no code set cannot be used.
 const { json, checkCode, accounts, pick, rc, e164, sendSms } = require("./lib/rc");
+const { twNumbers, twSend } = require("./lib/tw");
 
 exports.handler = async (ev) => {
   try {
@@ -18,6 +19,7 @@ exports.handler = async (ev) => {
       if (q.action !== "numbers") return json(400, { error: "Unknown action." });
       const a = pick(q.account);
       checkCode(a, given);
+      if (q.provider === "twilio") return json(200, { account: a.name, numbers: twNumbers(a).map(n => ({ number: n, label: "Twilio" })), total: twNumbers(a).length });
       let recs = [], page = 1;
       for (;;) {
         const j = await rc(a, `/restapi/v1.0/account/~/extension/~/phone-number?perPage=100&page=${page}`);
@@ -36,7 +38,7 @@ exports.handler = async (ev) => {
       if (!from) return json(400, { error: "Pick a valid sender number." });
       if (!to) return json(400, { error: "Invalid recipient number." });
       if (!text || text.length > 1000) return json(400, { error: "Message must be 1-1000 characters." });
-      const j = await sendSms(a, from, to, text);
+      const j = b.provider === "twilio" ? await twSend(a, from, to, text) : await sendSms(a, from, to, text);
       return json(200, { id: j.id, status: j.messageStatus, to, account: a.name });
     }
     return json(405, { error: "Method not allowed." });

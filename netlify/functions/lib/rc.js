@@ -20,10 +20,10 @@ function checkCode(a, given) {
 
 function accounts() {
   const list = [];
-  if (process.env.RC_JWT) list.push({ name: (process.env.RC_MAIN_NAME || "Main").trim(), jwt: process.env.RC_JWT, main: true });
+  if (process.env.RC_JWT || process.env.TWILIO_ACCOUNT_SID) list.push({ name: (process.env.RC_MAIN_NAME || "Main").trim(), jwt: process.env.RC_JWT, main: true });
   for (const n of (process.env.RC_ACCOUNTS || "").split(",").map(s => s.trim()).filter(Boolean)) {
     const jwt = process.env["RC_JWT_" + nameKey(n)];
-    if (jwt && !list.some(a => a.name.toLowerCase() === n.toLowerCase())) list.push({ name: n, jwt });
+    if (!list.some(a => a.name.toLowerCase() === n.toLowerCase())) list.push({ name: n, jwt });
   }
   return list;
 }
@@ -38,6 +38,7 @@ function pick(name) {
 async function token(a) {
   const t = tokens[a.name];
   if (t && Date.now() < t.exp - 60000) return t.value;
+  if (!a.jwt) throw Object.assign(new Error(`${a.name} has no RingCentral login set up (RC_JWT${a.main ? "" : "_" + nameKey(a.name)}). Use Twilio for this user or add the RingCentral JWT.`), { status: 400 });
   const { RC_CLIENT_ID: id, RC_CLIENT_SECRET: sec } = process.env;
   if (!id || !sec) throw Object.assign(new Error("RingCentral app credentials are not set in Netlify (RC_CLIENT_ID, RC_CLIENT_SECRET)."), { status: 500 });
   const r = await fetch(SERVER + "/restapi/oauth/token", {
